@@ -123,6 +123,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
