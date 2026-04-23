@@ -397,13 +397,29 @@ const (
 	failoverEngineCount = 2
 )
 
-// isFailoverEnabled returns true only for intra-pod failover mode, where the
+// IsFailoverEnabled returns true only for intra-pod failover mode, where the
 // main container is cloned into active + standby containers within the same pod.
 // Inter-pod failover (Mode=interPod) is handled separately via expandRolesForService
 // and generatePodSpecForRole — it does not use container cloning.
-func isFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+//
+// Exported because the checkpoint/restore wiring in the deployment controllers
+// uses it to populate the per-container snapshot-target-containers annotation
+// for cloned engine pods.
+func IsFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
 	return component.Failover != nil && component.Failover.Enabled &&
 		component.Failover.Mode == v1alpha1.GMSModeIntraPod
+}
+
+// FailoverEngineContainerNames returns the container names produced by the
+// failover pod transform, in order. Used by the checkpoint/restore wiring
+// to stamp the snapshot-target-containers annotation so the snapshot agent
+// restores the single checkpoint into every engine in the pod.
+func FailoverEngineContainerNames() []string {
+	names := make([]string, 0, failoverEngineCount)
+	for i := 0; i < failoverEngineCount; i++ {
+		names = append(names, fmt.Sprintf("engine-%d", i))
+	}
+	return names
 }
 
 // buildFailoverPod clones the main container into two engine containers (active + standby).

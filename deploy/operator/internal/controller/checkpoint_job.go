@@ -75,6 +75,11 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
+	// Checkpoint Jobs always capture exactly the main container. Other
+	// containers in the pod template (e.g. GMS saver sidecars the operator
+	// adds below) are preserved but not checkpointed. The annotation is
+	// the contract the snapshot-agent reads.
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
 	if podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
@@ -84,7 +89,20 @@ func buildCheckpointJob(
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
+	// The checkpoint Job is built around the main container by convention.
+	// ExtraPodSpec.PodSpec.Containers can inject extra containers before
+	// main (mergo merge happens before main is appended), so locate it by
+	// name to match the protocol's target-container selection.
+	var mainContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == consts.MainContainerName {
+			mainContainer = &podTemplate.Spec.Containers[i]
+			break
+		}
+	}
+	if mainContainer == nil {
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q", consts.MainContainerName)
+	}
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,

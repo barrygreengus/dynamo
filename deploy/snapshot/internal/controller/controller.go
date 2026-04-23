@@ -202,6 +202,14 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 
+	// Checkpoint contract: exactly one target container per job.
+	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
+	if err != nil {
+		w.log.Error(err, "Checkpoint pod missing target-containers annotation", "pod", podKey)
+		return
+	}
+	containerName := targets[0]
+
 	if !w.tryAcquire(podKey) {
 		return
 	}
@@ -229,7 +237,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointID))
 
 	go func() {
-		if err := w.runCheckpoint(ctx, pod, job, checkpointID, checkpointLocation, podKey, startedAt); err != nil {
+		if err := w.runCheckpoint(ctx, pod, job, checkpointID, containerName, checkpointLocation, podKey, startedAt); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
 			opLog.Error(err, "Checkpoint controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
@@ -269,12 +277,38 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	containerName := resolveMainContainerName(pod)
-	if containerName == "" {
-		w.log.Info("Restore pod has no containers", "pod", podKey)
+	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
+	if err != nil {
+		w.log.Error(err, "Restore pod missing target-containers annotation", "pod", podKey)
 		return
 	}
 
+	// For each target container: check if kubelet has a running container
+	// for it, check the per-container status annotation, and schedule a
+	// goroutine when (a) we see a fresh containerd ID and (b) the status is
+	// not already terminal for that ID.
+	for _, containerName := range targets {
+		w.maybeStartRestoreForContainer(ctx, pod, containerName, checkpointID, checkpointLocation, podKey)
+	}
+
+	// Aggregate rollup runs on the informer's single event loop, so it is
+	// the only writer of the aggregate annotation. Per-container workers
+	// only patch their own per-container keys.
+	w.reconcileRestoreAggregate(ctx, pod, targets)
+}
+
+// maybeStartRestoreForContainer handles one named target container in a
+// restore pod. It is a no-op when the container has not been scheduled by
+// kubelet yet, or when the agent has already recorded a terminal status for
+// the current containerd container ID.
+func (w *NodeController) maybeStartRestoreForContainer(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	checkpointID string,
+	checkpointLocation string,
+	podKey string,
+) {
 	containerID := ""
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name != containerName || cs.ContainerID == "" {
@@ -284,28 +318,32 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		break
 	}
 	if containerID == "" {
-		w.log.V(1).Info("Restore pod has no running main container yet", "pod", podKey, "container", containerName)
+		w.log.V(1).Info("Restore pod has no running container yet", "pod", podKey, "container", containerName)
 		return
 	}
 
-	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotation]
-	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotation]
+	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotationFor(containerName)]
+	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotationFor(containerName)]
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
 
-	restoreAttemptKey := fmt.Sprintf("%s/%s", podKey, containerID)
+	restoreAttemptKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, containerID)
 	if !w.tryAcquire(restoreAttemptKey) {
 		return
 	}
 
 	startedAt := time.Now()
-	w.log.Info("Restore target detected, triggering external restore", "pod", podKey, "checkpoint_id", checkpointID)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointID))
+	w.log.Info("Restore target detected, triggering external restore",
+		"pod", podKey,
+		"checkpoint_id", checkpointID,
+		"container", containerName,
+	)
+	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s for container %s", checkpointID, containerName))
 
 	go func() {
 		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey, startedAt); err != nil {
-			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
+			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", containerName)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		}
@@ -320,7 +358,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 //     volume on success (observed by the workload via inotify), or SIGKILL
 //     on failure (unrecoverable CUDA-locked process)
 //  5. Mark job as completed or failed
-func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, checkpointLocation, podKey string, startedAt time.Time) error {
+func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, containerName, checkpointLocation, podKey string, startedAt time.Time) error {
 	releasePodOnExit := true
 	defer func() {
 		if releasePodOnExit {
@@ -356,17 +394,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		return nil
 	}
 
-	// Resolve the target container
-	containerName := resolveMainContainerName(pod)
-	if containerName == "" {
-		err := fmt.Errorf("no containers found in pod spec")
-		log.Error(err, "Checkpoint failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
+	// Resolve the target container ID from pod status.
 	var containerID string
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == containerName {
@@ -375,7 +403,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		}
 	}
 	if containerID == "" {
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", "Could not resolve target container ID")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Could not resolve container %q ID", containerName))
 		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
@@ -484,9 +512,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
+		// Per-container keys carry the authoritative status. The
+		// aggregate key is rolled up in a second pass by
+		// reconcileRestoreAggregate so concurrent per-container workers
+		// never race on a write to the same aggregate key.
 		annotations := map[string]string{
-			snapshotprotocol.RestoreStatusAnnotation:      value,
-			snapshotprotocol.RestoreContainerIDAnnotation: containerID,
+			snapshotprotocol.RestoreStatusAnnotationFor(containerName):      value,
+			snapshotprotocol.RestoreContainerIDAnnotationFor(containerName): containerID,
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
@@ -580,6 +612,61 @@ func (w *NodeController) release(podKey string) {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, podKey)
+}
+
+// reconcileRestoreAggregate rolls the per-container restore statuses up into
+// snapshotprotocol.RestoreStatusAggregateAnnotation. It is driven by the
+// restore informer's single event loop, so it is the only writer of the
+// aggregate key and does not race with the concurrent per-container workers.
+//
+// Aggregation rules (restore targets are a hard-bounded set):
+//   - failed      if any target reports failed
+//   - completed   if every target reports completed
+//   - in_progress if any target reports in_progress or has no status yet
+//
+// The aggregate is only written when it actually changes, to keep the pod
+// from churning on repeated informer events.
+func (w *NodeController) reconcileRestoreAggregate(ctx context.Context, pod *corev1.Pod, targets []string) {
+	desired := snapshotprotocol.RestoreStatusInProgress
+	allCompleted := true
+	anyReported := false
+	for _, name := range targets {
+		status := pod.Annotations[snapshotprotocol.RestoreStatusAnnotationFor(name)]
+		switch status {
+		case snapshotprotocol.RestoreStatusFailed:
+			desired = snapshotprotocol.RestoreStatusFailed
+			allCompleted = false
+			anyReported = true
+		case snapshotprotocol.RestoreStatusCompleted:
+			anyReported = true
+		case snapshotprotocol.RestoreStatusInProgress:
+			allCompleted = false
+			anyReported = true
+		default:
+			allCompleted = false
+		}
+	}
+	if desired != snapshotprotocol.RestoreStatusFailed {
+		if allCompleted {
+			desired = snapshotprotocol.RestoreStatusCompleted
+		} else if !anyReported {
+			// No per-container worker has written a status yet; leave
+			// the aggregate alone.
+			return
+		}
+	}
+	current := pod.Annotations[snapshotprotocol.RestoreStatusAggregateAnnotation]
+	if current == desired {
+		return
+	}
+	if err := annotatePod(ctx, w.clientset, w.log, pod, map[string]string{
+		snapshotprotocol.RestoreStatusAggregateAnnotation: desired,
+	}); err != nil {
+		w.log.Error(err, "Failed to write aggregate restore status",
+			"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+			"aggregate", desired,
+		)
+	}
 }
 
 func (w *NodeController) checkpointLocationFromPod(pod *corev1.Pod, checkpointID string) (string, error) {

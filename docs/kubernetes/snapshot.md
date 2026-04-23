@@ -119,7 +119,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -
 
 ### 4. Create a `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, the first container in `spec.containers`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
+The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, a container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
+
+The Job pod template may contain extra containers (helper sidecars, log shippers, etc.), but the snapshot agent only checkpoints one of them. The operator picks the container named `main` and stamps the `nvidia.com/snapshot-target-containers` annotation on the Job pod template to make that decision explicit to the snapshot agent.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -293,6 +295,49 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
   -p '{"spec":{"services":{"VllmDecodeWorker":{"replicas":2}}}}'
 ```
 
+## Target Containers
+
+**Which container gets checkpointed? Which containers get restored into?** That is controlled by a single annotation on the Job pod template (for checkpoints) and on the restore pod (for restores):
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/snapshot-target-containers: "main"
+    # or "engine-0,engine-1" for intra-pod failover restores
+```
+
+The annotation is **mandatory**. `snapshot-agent`, `snapshotprotocol`, and `snapshotctl` all refuse to run without it.
+
+- **Checkpoint Jobs** must list **exactly one** target container. Extra containers in the pod template are allowed (helper sidecars, etc.) but only the named one is checkpointed.
+- **Restore pods** may list **one or more** target containers. The same checkpoint artifact is replayed into every named container in parallel.
+
+The Dynamo operator stamps this annotation for you:
+
+| Scenario | Annotation set by operator |
+|----------|----------------------------|
+| `DynamoCheckpoint` Job | `main` |
+| Non-failover `DynamoGraphDeployment` restore | `main` |
+| Failover (intra-pod) `DynamoGraphDeployment` restore | `engine-0,engine-1` |
+
+You only need to set the annotation by hand when driving `snapshotctl` directly (see below) or when building a custom pod outside the operator.
+
+Per-container status annotations written by `snapshot-agent`:
+
+| Annotation | Object | Meaning |
+|------------|--------|---------|
+| `nvidia.com/snapshot-checkpoint-status` | Job | `completed` or `failed`. The checkpoint contract is single-container, so this stays a singleton. |
+| `nvidia.com/snapshot-restore-status.<container>` | Pod | Per-container restore status: `in_progress`, `completed`, or `failed`. |
+| `nvidia.com/snapshot-restore-container-id.<container>` | Pod | Containerd container ID observed for the last restore attempt (used to dedupe across kubelet restarts). |
+| `nvidia.com/snapshot-restore-status` | Pod | Aggregate rollup across every target container: `failed` if any failed, `completed` if all completed, `in_progress` otherwise. |
+
+Observers (operator, `snapshotctl`, humans with `kubectl`) can usually stick to the aggregate annotations.
+
+## Failover Restore
+
+When `DynamoGraphDeployment.spec.services.<name>.failover.enabled: true`, the operator clones the main container into `engine-0` and `engine-1` (primary + shadow). Checkpoint is still single-container, captured against `main` in a standalone checkpoint Job; restore replays that same checkpoint into both engine containers concurrently. The snapshot agent coordinates the per-container sentinels and rolls the aggregate `nvidia.com/snapshot-restore-status` up once every engine has reached a terminal state.
+
+The `snapshot-control` emptyDir is mounted into each engine with `subPath: <containerName>`, so concurrent containers' lifecycle sentinels do not collide on disk. Each container still sees the control directory at `/snapshot-control` (via `$DYN_SNAPSHOT_CONTROL_DIR`) as if it owned the volume exclusively.
+
 ## Lower-Level Testing With `snapshotctl`
 
 It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
@@ -304,10 +349,12 @@ It is possible to checkpoint and restore pods without the Dynamo operator via th
 ```bash
 snapshotctl checkpoint \
   --manifest ./worker-pod.yaml \
+  --container main \
   --namespace ${NAMESPACE}
 ```
 
-The checkpoint manifest must be for a pod, contain exactly one worker container, and use a placeholder image.
+The checkpoint manifest must be for a pod and use a placeholder image. `--container` names the workload container inside the manifest to checkpoint (exactly one). You may omit the flag if the manifest already carries `nvidia.com/snapshot-target-containers` in its annotations; if both are set they must match.
+
 If you do not pass `--checkpoint-id`, `snapshotctl` generates one and prints it:
 
 ```text
@@ -325,10 +372,11 @@ checkpoint_location=/checkpoints/...
 snapshotctl restore \
   --manifest ./worker-pod.yaml \
   --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-...
+  --checkpoint-id manual-snapshot-... \
+  --containers main
 ```
 
-This creates a new restore pod from the manifest and waits for the restore annotation to reach `completed`.
+This creates a new restore pod from the manifest and waits for the aggregate `nvidia.com/snapshot-restore-status` annotation to reach `completed`. For a failover-style restore, pass a comma-separated list, e.g. `--containers engine-0,engine-1`. As with `checkpoint`, the manifest may pre-stamp the annotation and omit the flag.
 
 ### Restore an existing pod in place
 
@@ -336,10 +384,11 @@ This creates a new restore pod from the manifest and waits for the restore annot
 snapshotctl restore \
   --pod existing-restore-target \
   --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-...
+  --checkpoint-id manual-snapshot-... \
+  --containers main
 ```
 
-This patches restore metadata onto an existing pod that is already snapshot-compatible.
+This patches restore metadata (including `nvidia.com/snapshot-target-containers`) onto an existing pod that is already snapshot-compatible.
 
 ## Checkpoint Identity
 
@@ -440,12 +489,15 @@ This is also the path that `snapshotctl` uses when it resolves checkpoint storag
 
 ### `snapshotctl` manifest is rejected or the restore target is wrong
 
-`snapshotctl` only accepts a single-container `Pod` manifest.
+`snapshotctl` requires a `Pod` manifest and a target-container list. Multi-container manifests are supported as long as every name passed via `--container` / `--containers` (or the manifest's `nvidia.com/snapshot-target-containers` annotation) actually exists in the pod spec.
 
 ```bash
-snapshotctl checkpoint --manifest ./worker-pod.yaml --namespace ${NAMESPACE}
-snapshotctl restore --manifest ./worker-pod.yaml --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
+snapshotctl checkpoint --manifest ./worker-pod.yaml --container main --namespace ${NAMESPACE}
+snapshotctl restore  --manifest ./worker-pod.yaml --containers main --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
+snapshotctl restore  --pod failover-pod --containers engine-0,engine-1 --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
 ```
+
+If the manifest annotation and the CLI flag are both provided they must agree; `snapshotctl` rejects mismatches instead of silently picking one.
 
 ## Planned Features
 

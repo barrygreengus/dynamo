@@ -6,6 +6,8 @@ package protocol
 import (
 	"fmt"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -13,9 +15,45 @@ const (
 	CheckpointIDLabel                   = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel                  = "nvidia.com/snapshot-is-restore-target"
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
-	CheckpointStatusAnnotation          = "nvidia.com/snapshot-checkpoint-status"
-	RestoreStatusAnnotation             = "nvidia.com/snapshot-restore-status"
-	RestoreContainerIDAnnotation        = "nvidia.com/snapshot-restore-container-id"
+
+	// TargetContainersAnnotation names the container(s) a checkpoint or
+	// restore operation should act on. It is required — snapshotprotocol /
+	// snapshotctl / snapshot-agent all error out when the annotation is
+	// missing. Comma-separated list of container names in a single pod:
+	//
+	//   nvidia.com/snapshot-target-containers = "engine-0,engine-1"
+	//
+	// Checkpoint Jobs must carry exactly one target container (the snapshot
+	// contract captures one workload container per checkpoint). Restore pods
+	// may carry one or more target containers; the agent replays the same
+	// checkpoint into each of them. The operator stamps the annotation for
+	// both user-facing paths (DynamoCheckpoint Jobs and DGD restore pods).
+	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
+
+	// CheckpointStatusAnnotation is written by snapshot-agent on the
+	// checkpoint Job once the (single) target container's checkpoint either
+	// completes or fails. Watched by the operator and snapshotctl.
+	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
+
+	// RestoreStatusAnnotationPrefix is the prefix for per-container restore
+	// status annotations written by snapshot-agent onto the restore pod.
+	// The full key is "nvidia.com/snapshot-restore-status.<containerName>",
+	// one per target container. Use RestoreStatusAnnotationFor to build it.
+	RestoreStatusAnnotationPrefix = "nvidia.com/snapshot-restore-status."
+
+	// RestoreContainerIDAnnotationPrefix is the prefix for per-container
+	// containerd container-ID annotations used to dedupe restore attempts
+	// across kubelet container restarts. Full key is
+	// "nvidia.com/snapshot-restore-container-id.<containerName>".
+	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
+
+	// RestoreStatusAggregateAnnotation is the pod-level rollup status
+	// written by snapshot-agent. "completed" iff every target container is
+	// completed, "failed" if any target container failed, "in_progress"
+	// otherwise. Watched by the operator and snapshotctl so they do not
+	// need to know the per-container name list.
+	RestoreStatusAggregateAnnotation = "nvidia.com/snapshot-restore-status"
+
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
@@ -34,6 +72,18 @@ type Storage struct {
 	Location string
 	PVCName  string
 	BasePath string
+}
+
+// findContainerByName returns a pointer to the named container in the slice,
+// or nil if not found. Used by the protocol helpers to look up target
+// containers declared in the snapshot-target-containers annotation.
+func findContainerByName(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
 }
 
 func ArtifactVersion(version string) string {
@@ -66,14 +116,109 @@ func ResolveRestoreStorage(checkpointID string, version string, location string,
 	return resolved, nil
 }
 
+// RestoreStatusAnnotationFor returns the per-container restore status
+// annotation key. Safe to call with any container name.
+func RestoreStatusAnnotationFor(containerName string) string {
+	return RestoreStatusAnnotationPrefix + containerName
+}
+
+// RestoreContainerIDAnnotationFor returns the per-container containerd-ID
+// annotation key used by the restore dedupe path.
+func RestoreContainerIDAnnotationFor(containerName string) string {
+	return RestoreContainerIDAnnotationPrefix + containerName
+}
+
+// FormatTargetContainers renders a target-container list into the canonical
+// comma-separated annotation value. Whitespace is trimmed, empty names are
+// dropped, and duplicates are preserved in input order (callers are
+// responsible for providing a sensible list).
+func FormatTargetContainers(names []string) string {
+	cleaned := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		cleaned = append(cleaned, name)
+	}
+	return strings.Join(cleaned, ",")
+}
+
+// ParseTargetContainers returns the list of target container names encoded
+// in the nvidia.com/snapshot-target-containers annotation, in order. A
+// missing or empty annotation returns an empty slice; callers decide whether
+// that is an error. Whitespace is trimmed and duplicate names are rejected.
+func ParseTargetContainers(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("empty container name in %s=%q", TargetContainersAnnotation, value)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("duplicate container name %q in %s=%q", name, TargetContainersAnnotation, value)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+// TargetContainersFromAnnotations reads the target-container list from an
+// annotation map. It enforces the snapshot contract: the annotation is
+// required, and at least minCount / at most maxCount names must be present
+// (maxCount == 0 means "no upper bound").
+func TargetContainersFromAnnotations(annotations map[string]string, minCount, maxCount int) ([]string, error) {
+	raw, ok := annotations[TargetContainersAnnotation]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("missing required %s annotation", TargetContainersAnnotation)
+	}
+	names, err := ParseTargetContainers(raw)
+	if err != nil {
+		return nil, err
+	}
+	if minCount > 0 && len(names) < minCount {
+		return nil, fmt.Errorf("%s must list at least %d container name(s), got %d", TargetContainersAnnotation, minCount, len(names))
+	}
+	if maxCount > 0 && len(names) > maxCount {
+		return nil, fmt.Errorf("%s must list at most %d container name(s), got %d", TargetContainersAnnotation, maxCount, len(names))
+	}
+	return names, nil
+}
+
+// clearRestoreStatusKeys drops every per-container and aggregate restore
+// status annotation from the map. Used when re-applying restore-target
+// metadata before a new restore so stale values from a previous run do not
+// leak into observation.
+func clearRestoreStatusKeys(annotations map[string]string) {
+	for key := range annotations {
+		if strings.HasPrefix(key, RestoreStatusAnnotationPrefix) ||
+			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) {
+			delete(annotations, key)
+		}
+	}
+	delete(annotations, RestoreStatusAggregateAnnotation)
+}
+
+// ApplyRestoreTargetMetadata resets restore-related labels/annotations and
+// (when enabled) stamps the restore-target label + checkpoint identifiers.
+// The nvidia.com/snapshot-target-containers annotation is the caller's
+// responsibility: the operator stamps it based on failover vs non-failover
+// intent, snapshotctl stamps it from --containers, etc. This helper never
+// touches it so callers can set it before or after with no ordering surprise.
 func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
 	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
-	delete(annotations, RestoreStatusAnnotation)
-	delete(annotations, RestoreContainerIDAnnotation)
+	clearRestoreStatusKeys(annotations)
 
 	if !enabled {
 		return

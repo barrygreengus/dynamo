@@ -87,12 +87,21 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Status: corev1.ConditionTrue,
 		})
 	}
+	// The snapshot contract requires the target-containers annotation on
+	// every checkpoint/restore pod; stamp it here so individual cases do
+	// not have to repeat themselves.
+	merged := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: "main",
+	}
+	for k, v := range annotations {
+		merged[k] = v
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: annotations,
+			Annotations: merged,
 		},
 		Spec: corev1.PodSpec{
 			NodeName: nodeName,
@@ -429,8 +438,8 @@ func TestReconcileRestorePod(t *testing.T) {
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
+					snapshotprotocol.RestoreStatusAnnotationFor("main"):      tc.annotationStatus,
+					snapshotprotocol.RestoreContainerIDAnnotationFor("main"): tc.annotationContainerID,
 				}
 			}
 
@@ -451,7 +460,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			ctx := context.Background()
 
 			if tc.preSeed {
-				w.inFlight["default/test-pod/"+testContainerID] = struct{}{}
+				w.inFlight["default/test-pod/main/"+testContainerID] = struct{}{}
 			}
 
 			w.reconcileRestorePod(ctx, pod)
@@ -516,7 +525,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

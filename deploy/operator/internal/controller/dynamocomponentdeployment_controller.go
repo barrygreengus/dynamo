@@ -1059,6 +1059,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
+		// Failover services run engine-0/engine-1 in place of a single main
+		// container. The snapshot agent needs to restore the same checkpoint
+		// into every engine, driven by the snapshot-target-containers
+		// annotation.
+		if dynamo.IsFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
+			info.RestoreTargetContainers = dynamo.FailoverEngineContainerNames()
+		}
 		checkpointInfo = info
 	}
 

@@ -36,6 +36,13 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	// RestoreTargetContainers is the list of container names in the
+	// restore pod that the snapshot agent should restore the checkpoint
+	// into. Empty means "use the default target" (the container named
+	// commonconsts.MainContainerName). The failover path populates this
+	// with engine-0/engine-1 so the agent restores the same checkpoint
+	// into both the primary and the shadow engine.
+	RestoreTargetContainers []string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
