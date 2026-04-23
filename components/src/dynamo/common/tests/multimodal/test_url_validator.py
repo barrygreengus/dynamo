@@ -13,13 +13,11 @@ import socket
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from dynamo.common.multimodal.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
-    fetch_with_revalidation,
     is_blocked_ip,
     validate_local_path,
     validate_url,
@@ -312,99 +310,6 @@ def test_policy_from_env_allow_internal(monkeypatch) -> None:
     assert policy.allowed_local_path == "/data/media"
 
 
-# ---------------------------------------------------------------------------
-# fetch_with_revalidation()
-# ---------------------------------------------------------------------------
-
-
-def _mock_response(
-    status_code: int = 200,
-    location: str | None = None,
-    *,
-    request_url: str = "https://example.com/x.png",
-) -> MagicMock:
-    resp = MagicMock(spec=httpx.Response)
-    resp.status_code = status_code
-    resp.headers = {}
-    resp.url = httpx.URL(request_url)
-    resp.is_redirect = status_code in (301, 302, 303, 307, 308)
-    if location is not None:
-        resp.headers = {"location": location}
-    resp.aclose = AsyncMock()
-    return resp
-
-
-def _mock_client(responses: list[MagicMock]) -> MagicMock:
-    client = MagicMock(spec=httpx.AsyncClient)
-    client.build_request = MagicMock(
-        side_effect=lambda method, url, headers=None: MagicMock(spec=httpx.Request)
-    )
-    client.send = AsyncMock(side_effect=list(responses))
-    return client
-
-
-@pytest.mark.asyncio
-async def test_fetch_with_revalidation_returns_first_response() -> None:
-    policy = PERMISSIVE
-    resp = _mock_response(status_code=200)
-    client = _mock_client([resp])
-
-    result = await fetch_with_revalidation(client, "https://example.com/x.png", policy)
-    assert result is resp
-    assert client.send.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_fetch_with_revalidation_follows_safe_redirect() -> None:
-    policy = PERMISSIVE
-    redirect = _mock_response(
-        status_code=302,
-        location="https://example.com/final.png",
-        request_url="https://example.com/x.png",
-    )
-    final = _mock_response(status_code=200, request_url="https://example.com/final.png")
-    client = _mock_client([redirect, final])
-
-    result = await fetch_with_revalidation(client, "https://example.com/x.png", policy)
-    assert result is final
-    assert client.send.await_count == 2
-    redirect.aclose.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_fetch_with_revalidation_blocks_redirect_to_private_ip() -> None:
-    # Strict policy — first hop is OK (public-IP literal), redirect target is blocked.
-    strict = UrlValidationPolicy(allow_private_ips=False)
-
-    redirect = _mock_response(
-        status_code=302,
-        location="http://169.254.169.254/latest/meta-data/",
-        request_url="https://8.8.8.8/x.png",
-    )
-    client = _mock_client([redirect])
-
-    with pytest.raises(UrlValidationError):
-        await fetch_with_revalidation(client, "https://8.8.8.8/x.png", strict)
-    # Only one send — the redirect target is rejected before any further fetch.
-    assert client.send.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_fetch_with_revalidation_enforces_redirect_limit() -> None:
-    # _MAX_REDIRECTS is hardcoded at 3; we need 4 redirect responses to trip it.
-    policy = UrlValidationPolicy(allow_private_ips=True)  # keep DNS out of this test
-
-    def _hop(src: str, dst: str) -> MagicMock:
-        return _mock_response(status_code=302, location=dst, request_url=src)
-
-    client = _mock_client(
-        [
-            _hop("https://example.com/a", "https://example.com/b"),
-            _hop("https://example.com/b", "https://example.com/c"),
-            _hop("https://example.com/c", "https://example.com/d"),
-            _hop("https://example.com/d", "https://example.com/e"),
-        ]
-    )
-
-    with pytest.raises(UrlValidationError, match="Too many redirects"):
-        await fetch_with_revalidation(client, "https://example.com/a", policy)
+# Fetch-with-revalidation tests now live in test_http_backends.py where
+# they exercise the backend-neutral facade path against both httpx and
+# aiohttp. See ``test_fetch_with_policy_*``.
