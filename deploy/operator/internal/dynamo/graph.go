@@ -1363,7 +1363,7 @@ func GenerateBasePodSpec(
 
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
-	if IsFailoverEnabled(component) {
+	if IsIntraPodFailoverEnabled(component) {
 		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
@@ -1567,7 +1567,13 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	if p.operatorConfig.Checkpoint.Enabled {
+	// GMS weight-server pods are not a checkpoint/restore target: they run
+	// gpu_memory_service.cli.server (not the dynamo runtime), load weights
+	// fresh from disk, and have no CRIU state to capture. Shaping them as
+	// restore targets would replace the GMS wrapper command with
+	// `sleep infinity` and break the inter-pod GMS layout entirely. The
+	// companion ApplyRestorePodMetadata call below is also skipped for GMS.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 		); err != nil {
@@ -1646,7 +1652,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	// Skip restore-target metadata on GMS weight-server pods; see the
+	// corresponding InjectCheckpointIntoPodSpec guard above.
+	if p.r.Role != RoleGMS {
+		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 

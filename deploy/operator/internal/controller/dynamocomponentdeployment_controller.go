@@ -1059,12 +1059,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
-		// Failover services run engine-0/engine-1 in place of a single main
-		// container. The snapshot agent needs to restore the same checkpoint
-		// into every engine, driven by the snapshot-target-containers
-		// annotation.
-		if dynamo.IsFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.FailoverEngineContainerNames()
+		// Intra-pod failover services run engine-0/engine-1 in place of a
+		// single main container. Tell the snapshot agent to restore the
+		// same checkpoint into every engine via the
+		// nvidia.com/snapshot-target-containers annotation. Inter-pod
+		// failover keeps a single main container per engine pod and does
+		// not need this override.
+		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
 		checkpointInfo = info
 	}

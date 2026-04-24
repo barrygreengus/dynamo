@@ -317,7 +317,11 @@ The Dynamo operator stamps this annotation for you:
 |----------|----------------------------|
 | `DynamoCheckpoint` Job | `main` |
 | Non-failover `DynamoGraphDeployment` restore | `main` |
-| Failover (intra-pod) `DynamoGraphDeployment` restore | `engine-0,engine-1` |
+| Intra-pod failover (`failover.mode: intraPod`) restore | `engine-0,engine-1` |
+| Inter-pod failover (`failover.mode: interPod`) restore | `main` on every engine pod (primary and each shadow) |
+| Inter-pod GMS weight-server pods | no annotation — GMS pods are not a checkpoint/restore target |
+
+Inter-pod failover restores each engine pod (primary + N shadows) independently from the same checkpoint — one annotation per pod, not one pod with many target containers. Intra-pod failover is the only topology where a single restore pod has multiple target containers, because the operator clones `main` into `engine-0` + `engine-1` in place.
 
 You only need to set the annotation by hand when driving `snapshotctl` directly (see below) or when building a custom pod outside the operator.
 
@@ -328,15 +332,24 @@ Per-container status annotations written by `snapshot-agent`:
 | `nvidia.com/snapshot-checkpoint-status` | Job | `completed` or `failed`. The checkpoint contract is single-container, so this stays a singleton. |
 | `nvidia.com/snapshot-restore-status.<container>` | Pod | Per-container restore status: `in_progress`, `completed`, or `failed`. |
 | `nvidia.com/snapshot-restore-container-id.<container>` | Pod | Containerd container ID observed for the last restore attempt (used to dedupe across kubelet restarts). |
-| `nvidia.com/snapshot-restore-status` | Pod | Aggregate rollup across every target container: `failed` if any failed, `completed` if all completed, `in_progress` otherwise. |
 
-Observers (operator, `snapshotctl`, humans with `kubectl`) can usually stick to the aggregate annotations.
+There is no stored pod-level restore rollup annotation. Humans and debugging tools can inspect the per-container status annotations directly.
+
+Kubernetes readiness is still the serving-readiness source of truth. For restore targets, the operator/snapshotctl shape each target container with a startup probe that waits for that container's `/snapshot-control/restore-complete` sentinel. Once the snapshot agent writes the sentinel, the container's normal readiness probe (if any) takes over. Cold-started non-target containers keep their normal readiness behavior, so the Pod `Ready` condition only becomes true after every restored and cold-started container is ready.
 
 ## Failover Restore
 
-When `DynamoGraphDeployment.spec.services.<name>.failover.enabled: true`, the operator clones the main container into `engine-0` and `engine-1` (primary + shadow). Checkpoint is still single-container, captured against `main` in a standalone checkpoint Job; restore replays that same checkpoint into both engine containers concurrently. The snapshot agent coordinates the per-container sentinels and rolls the aggregate `nvidia.com/snapshot-restore-status` up once every engine has reached a terminal state.
+Dynamo supports two distinct failover topologies. Both are orthogonal to the snapshot-target-containers contract; the operator does the right thing for each, and users only care about the annotation directly when driving `snapshotctl`.
+
+### Intra-pod failover (`failover.mode: intraPod`)
+
+The operator clones the main container into `engine-0` and `engine-1` (primary + shadow) inside a single pod. Checkpoint is still single-container, captured against `main` in a standalone checkpoint Job; restore replays that same checkpoint into both engine containers concurrently. The operator stamps `nvidia.com/snapshot-target-containers = "engine-0,engine-1"` on the restore pod, and the snapshot agent writes per-container status annotations and per-container `restore-complete` sentinels as each engine is restored.
 
 The `snapshot-control` emptyDir is mounted into each engine with `subPath: <containerName>`, so concurrent containers' lifecycle sentinels do not collide on disk. Each container still sees the control directory at `/snapshot-control` (via `$DYN_SNAPSHOT_CONTROL_DIR`) as if it owned the volume exclusively.
+
+### Inter-pod failover (`failover.mode: interPod`)
+
+The operator creates one primary engine pod plus `failover.numShadows` shadow engine pods per rank, each with a single `main` container, alongside a dedicated GMS weight-server pod per rank. Each engine pod is an independent snapshot restore target and gets its own `nvidia.com/snapshot-target-containers = "main"` stamp; the snapshot agent restores each pod independently. GMS weight-server pods are never shaped as restore targets — they run `gpu_memory_service.cli.server` and load weights fresh from disk.
 
 ## Lower-Level Testing With `snapshotctl`
 
@@ -376,7 +389,7 @@ snapshotctl restore \
   --containers main
 ```
 
-This creates a new restore pod from the manifest and waits for the aggregate `nvidia.com/snapshot-restore-status` annotation to reach `completed`. For a failover-style restore, pass a comma-separated list, e.g. `--containers engine-0,engine-1`. As with `checkpoint`, the manifest may pre-stamp the annotation and omit the flag.
+This creates a new restore pod from the manifest and returns after the request is submitted. For a failover-style restore, pass a comma-separated list, e.g. `--containers engine-0,engine-1`. As with `checkpoint`, the manifest may pre-stamp the annotation and omit the flag. Observe restore progress through Kubernetes readiness, pod events/logs, and the per-container `nvidia.com/snapshot-restore-status.<container>` annotations.
 
 ### Restore an existing pod in place
 
@@ -388,7 +401,7 @@ snapshotctl restore \
   --containers main
 ```
 
-This patches restore metadata (including `nvidia.com/snapshot-target-containers`) onto an existing pod that is already snapshot-compatible.
+This patches restore metadata (including `nvidia.com/snapshot-target-containers`) onto an existing pod that is already snapshot-compatible and returns after the patch is accepted.
 
 ## Checkpoint Identity
 

@@ -11,9 +11,22 @@ import (
 )
 
 const (
-	CheckpointSourceLabel               = "nvidia.com/snapshot-is-checkpoint-source"
-	CheckpointIDLabel                   = "nvidia.com/snapshot-checkpoint-id"
-	RestoreTargetLabel                  = "nvidia.com/snapshot-is-restore-target"
+	// CheckpointSourceLabel tags the Job pod template (i.e. the pod whose
+	// checkpoint gets written to disk). The snapshot agent's checkpoint
+	// informer selects on this label.
+	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
+
+	// CheckpointIDLabel is the 16-character identity hash (or a generated
+	// manual ID for snapshotctl flows). Both the checkpoint Job pod and
+	// the restore pod carry it; the CheckpointSourceLabel is what
+	// distinguishes them.
+	//
+	// Restore pods are therefore selected as
+	//   CheckpointIDLabel exists AND NOT CheckpointSourceLabel exists
+	// which is cleaner than carrying a redundant "is restore target"
+	// boolean label in parallel with the target-containers annotation.
+	CheckpointIDLabel = "nvidia.com/snapshot-checkpoint-id"
+
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
 	// TargetContainersAnnotation names the container(s) a checkpoint or
@@ -47,18 +60,11 @@ const (
 	// "nvidia.com/snapshot-restore-container-id.<containerName>".
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
 
-	// RestoreStatusAggregateAnnotation is the pod-level rollup status
-	// written by snapshot-agent. "completed" iff every target container is
-	// completed, "failed" if any target container failed, "in_progress"
-	// otherwise. Watched by the operator and snapshotctl so they do not
-	// need to know the per-container name list.
-	RestoreStatusAggregateAnnotation = "nvidia.com/snapshot-restore-status"
-
-	CheckpointVolumeName                = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
+	CheckpointVolumeName             = "checkpoint-storage"
+	DefaultCheckpointArtifactVersion = "1"
+	DefaultCheckpointJobTTLSeconds   = int32(300)
+	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
+	StorageTypePVC                   = "pvc"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"
@@ -192,29 +198,31 @@ func TargetContainersFromAnnotations(annotations map[string]string, minCount, ma
 	return names, nil
 }
 
-// clearRestoreStatusKeys drops every per-container and aggregate restore
-// status annotation from the map. Used when re-applying restore-target
-// metadata before a new restore so stale values from a previous run do not
-// leak into observation.
+// clearRestoreStatusKeys drops every restore status annotation from the map.
+// Used when re-applying restore-target metadata before a new restore so stale
+// values from a previous run do not leak into observation.
 func clearRestoreStatusKeys(annotations map[string]string) {
+	delete(annotations, "nvidia.com/snapshot-restore-status")
+	delete(annotations, "nvidia.com/snapshot-restore-container-id")
 	for key := range annotations {
 		if strings.HasPrefix(key, RestoreStatusAnnotationPrefix) ||
 			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) {
 			delete(annotations, key)
 		}
 	}
-	delete(annotations, RestoreStatusAggregateAnnotation)
 }
 
 // ApplyRestoreTargetMetadata resets restore-related labels/annotations and
-// (when enabled) stamps the restore-target label + checkpoint identifiers.
-// The nvidia.com/snapshot-target-containers annotation is the caller's
-// responsibility: the operator stamps it based on failover vs non-failover
-// intent, snapshotctl stamps it from --containers, etc. This helper never
-// touches it so callers can set it before or after with no ordering surprise.
+// (when enabled) stamps the checkpoint-id label + artifact version
+// annotation. A pod is identified as a restore target by the snapshot agent
+// via (CheckpointIDLabel present, CheckpointSourceLabel absent); there is
+// no dedicated "is restore target" label. The nvidia.com/snapshot-target-
+// containers annotation is the caller's responsibility: the operator stamps
+// it based on failover vs non-failover intent, snapshotctl stamps it from
+// --containers, etc. This helper never touches it so callers can set it
+// before or after with no ordering surprise.
 func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
-	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
@@ -224,7 +232,6 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		return
 	}
 
-	labels[RestoreTargetLabel] = "true"
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}
@@ -232,7 +239,6 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 }
 
 func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {
-	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 

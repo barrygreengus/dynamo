@@ -427,9 +427,12 @@ func TestReconcileRestorePod(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			labels := map[string]string{
-				snapshotprotocol.RestoreTargetLabel: "true",
-			}
+			// Restore pods are identified by snapshot-agent as
+			// (CheckpointIDLabel present, CheckpointSourceLabel absent),
+			// so the restore informer's label selector does the filtering.
+			// The hash-missing case deliberately omits the label to exercise
+			// the early-return branch in reconcileRestorePod.
+			labels := map[string]string{}
 			if tc.hash != "" {
 				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
 			}

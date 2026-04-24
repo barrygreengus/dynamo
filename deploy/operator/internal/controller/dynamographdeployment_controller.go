@@ -1356,12 +1356,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			logger.Error(err, "Failed to resolve checkpoint for service", "service", serviceName)
 			return nil, nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
 		}
-		// Failover services run engine-0/engine-1 in place of a single
-		// main container. Tell the snapshot agent to restore the same
-		// checkpoint into every engine via the
-		// nvidia.com/snapshot-target-containers annotation.
-		if dynamo.IsFailoverEnabled(component) {
-			info.RestoreTargetContainers = dynamo.FailoverEngineContainerNames()
+		// Intra-pod failover services run engine-0/engine-1 in place of a
+		// single main container. Tell the snapshot agent to restore the
+		// same checkpoint into every engine via the
+		// nvidia.com/snapshot-target-containers annotation. Inter-pod
+		// failover keeps a single main container per engine pod and does
+		// not need this override.
+		if dynamo.IsIntraPodFailoverEnabled(component) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
 
 		// Store checkpoint info for later use in pod spec generation

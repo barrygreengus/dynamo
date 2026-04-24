@@ -102,5 +102,8 @@ snapshotctl restore \
 
 - `restore --pod` expects a pod that is already compatible with snapshot restore
 - `restore --manifest` creates a new restore target pod from the manifest you provide
+- `restore` returns after the restore request is submitted; it does not wait for completion
+- observe restore progress with pod readiness, events/logs, and per-container
+  `nvidia.com/snapshot-restore-status.<container>` annotations
 - `snapshotctl` is useful for debugging and lower-level validation, but it does
   not replace the operator-managed checkpoint flow

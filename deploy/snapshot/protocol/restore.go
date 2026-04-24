@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -98,21 +99,37 @@ func PrepareRestorePodSpec(
 }
 
 func ensureRestoreStartupProbe(container *corev1.Container) {
-	startup := container.StartupProbe
-	if startup == nil {
-		startup = container.LivenessProbe
-		if startup == nil {
-			startup = container.ReadinessProbe
+	container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: restoreStartupProbeCommand(),
+			},
+		},
+		PeriodSeconds:    1,
+		FailureThreshold: math.MaxInt32,
+		SuccessThreshold: 1,
+	}
+}
+
+func restoreStartupProbeCommand() []string {
+	return []string{"cat", filepath.Join(SnapshotControlMountPath, RestoreCompleteFile)}
+}
+
+func hasRestoreStartupProbe(probe *corev1.Probe) bool {
+	if probe == nil || probe.Exec == nil {
+		return false
+	}
+	got := probe.Exec.Command
+	want := restoreStartupProbeCommand()
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
 		}
 	}
-	if startup == nil {
-		return
-	}
-
-	startup = startup.DeepCopy()
-	startup.FailureThreshold = math.MaxInt32
-	startup.SuccessThreshold = 1
-	container.StartupProbe = startup
+	return true
 }
 
 // ValidateRestorePodSpec verifies that a pod spec is shaped correctly for
@@ -192,6 +209,9 @@ func ValidateRestorePodSpec(
 		}
 		if !hasControlEnv {
 			return fmt.Errorf("missing %s env var on container %q", SnapshotControlDirEnv, name)
+		}
+		if !hasRestoreStartupProbe(container.StartupProbe) {
+			return fmt.Errorf("missing restore-complete startup probe on container %q", name)
 		}
 	}
 	if seccompProfile == "" {

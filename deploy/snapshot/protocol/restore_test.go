@@ -57,11 +57,11 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Name != "worker" || restorePod.Namespace != "test-ns" {
 		t.Fatalf("unexpected restore pod identity: %#v", restorePod.ObjectMeta)
 	}
-	if restorePod.Labels[RestoreTargetLabel] != "true" {
-		t.Fatalf("expected restore target label: %#v", restorePod.Labels)
-	}
 	if restorePod.Labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint id label: %#v", restorePod.Labels)
+	}
+	if _, has := restorePod.Labels[CheckpointSourceLabel]; has {
+		t.Fatalf("restore pod must not carry the checkpoint-source label: %#v", restorePod.Labels)
 	}
 	if restorePod.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
 		t.Fatalf("expected checkpoint artifact version annotation: %#v", restorePod.Annotations)
@@ -92,11 +92,9 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected liveness initial delay %d, got %d", livenessProbe.InitialDelaySeconds, got)
 	}
 	if main.StartupProbe == nil {
-		t.Fatalf("expected startup probe to be preserved")
+		t.Fatalf("expected startup probe to gate restore completion")
 	}
-	if got := main.StartupProbe.FailureThreshold; got != math.MaxInt32 {
-		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
-	}
+	assertRestoreStartupGate(t, main.StartupProbe)
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
 	}
@@ -167,6 +165,7 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		if c.Args != nil {
 			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
 		}
+		assertRestoreStartupGate(t, c.StartupProbe)
 		found := false
 		for _, m := range c.VolumeMounts {
 			if m.Name == SnapshotControlVolumeName {
@@ -319,17 +318,12 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected liveness timeout %d, got %d", livenessProbe.TimeoutSeconds, got)
 	}
 	if container.StartupProbe == nil {
-		t.Fatalf("expected startup probe to be preserved")
+		t.Fatalf("expected startup probe to gate restore completion")
 	}
-	if got := container.StartupProbe.FailureThreshold; got != math.MaxInt32 {
-		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
-	}
-	if got := container.StartupProbe.SuccessThreshold; got != 1 {
-		t.Fatalf("expected startup success threshold 1, got %d", got)
-	}
+	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
-func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
+func TestPrepareRestorePodSpecUsesRestoreStartupGateWithLiveness(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: "/livez"},
@@ -356,20 +350,12 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 		t.Fatalf("expected liveness probe to be preserved")
 	}
 	if container.StartupProbe == nil {
-		t.Fatalf("expected startup probe to be synthesized")
+		t.Fatalf("expected startup probe to gate restore completion")
 	}
-	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
-		t.Fatalf("expected startup probe HTTP path /livez, got %#v", container.StartupProbe.HTTPGet)
-	}
-	if got := container.StartupProbe.FailureThreshold; got != math.MaxInt32 {
-		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
-	}
-	if got := container.StartupProbe.SuccessThreshold; got != 1 {
-		t.Fatalf("expected startup success threshold 1, got %d", got)
-	}
+	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
-func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
+func TestPrepareRestorePodSpecUsesRestoreStartupGateWithReadiness(t *testing.T) {
 	readinessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{Command: []string{"cat", "/tmp/ready"}},
@@ -399,15 +385,32 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		t.Fatalf("expected readiness success threshold %d, got %d", readinessProbe.SuccessThreshold, got)
 	}
 	if container.StartupProbe == nil {
-		t.Fatalf("expected startup probe to be synthesized")
+		t.Fatalf("expected startup probe to gate restore completion")
 	}
-	if container.StartupProbe.Exec == nil || len(container.StartupProbe.Exec.Command) != 2 || container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
-		t.Fatalf("expected startup probe exec command to match readiness probe: %#v", container.StartupProbe.Exec)
+	assertRestoreStartupGate(t, container.StartupProbe)
+}
+
+func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
+	t.Helper()
+	if probe == nil || probe.Exec == nil {
+		t.Fatalf("expected exec startup probe, got %#v", probe)
 	}
-	if got := container.StartupProbe.FailureThreshold; got != math.MaxInt32 {
+	want := []string{"cat", "/snapshot-control/restore-complete"}
+	if len(probe.Exec.Command) != len(want) {
+		t.Fatalf("startup probe command = %#v, want %#v", probe.Exec.Command, want)
+	}
+	for i := range want {
+		if probe.Exec.Command[i] != want[i] {
+			t.Fatalf("startup probe command = %#v, want %#v", probe.Exec.Command, want)
+		}
+	}
+	if got := probe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected startup period 1, got %d", got)
+	}
+	if got := probe.FailureThreshold; got != math.MaxInt32 {
 		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
 	}
-	if got := container.StartupProbe.SuccessThreshold; got != 1 {
+	if got := probe.SuccessThreshold; got != 1 {
 		t.Fatalf("expected startup success threshold 1, got %d", got)
 	}
 }
@@ -418,14 +421,16 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 	}
 	containers := make([]corev1.Container, 0, len(targets))
 	for _, name := range targets {
-		containers = append(containers, corev1.Container{
+		container := corev1.Container{
 			Name: name,
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: CheckpointVolumeName, MountPath: "/checkpoints"},
 				{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath, SubPath: name},
 			},
 			Env: []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}},
-		})
+		}
+		ensureRestoreStartupProbe(&container)
+		containers = append(containers, container)
 	}
 	return &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
@@ -493,6 +498,18 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	badSpec.Containers[0].Env = nil
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, SnapshotControlDirEnv) {
 		t.Fatalf("expected missing control env error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].StartupProbe = nil
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing restore-complete startup probe on container "main"` {
+		t.Fatalf("expected missing restore startup probe error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].StartupProbe.Exec.Command = []string{"cat", "/tmp/not-restore-complete"}
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing restore-complete startup probe on container "main"` {
+		t.Fatalf("expected wrong restore startup probe error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()

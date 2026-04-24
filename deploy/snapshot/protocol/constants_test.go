@@ -14,22 +14,20 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		CheckpointIDLabel:     "old",
 	}
 	annotations := map[string]string{
-		CheckpointArtifactVersionAnnotation:                 "old",
-		CheckpointStatusAnnotation:                          "completed",
-		RestoreStatusAggregateAnnotation:                    "failed",
-		RestoreStatusAnnotationFor("main"):                  "failed",
-		RestoreStatusAnnotationFor("engine-1"):              "completed",
-		RestoreContainerIDAnnotationFor("main"):             "dead-container",
-		RestoreContainerIDAnnotationFor("engine-1"):         "dead-container",
+		CheckpointArtifactVersionAnnotation:         "old",
+		CheckpointStatusAnnotation:                  "completed",
+		RestoreStatusAnnotationFor("main"):          "failed",
+		RestoreStatusAnnotationFor("engine-1"):      "completed",
+		RestoreContainerIDAnnotationFor("main"):     "dead-container",
+		RestoreContainerIDAnnotationFor("engine-1"): "dead-container",
+		"nvidia.com/snapshot-restore-status":        "completed",
+		"nvidia.com/snapshot-restore-container-id":  "dead-container",
 		// Preserve the target-containers annotation across ApplyRestoreTargetMetadata.
 		TargetContainersAnnotation: "main",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
 
-	if labels[RestoreTargetLabel] != "true" {
-		t.Fatalf("expected restore target label, got %#v", labels)
-	}
 	if labels[CheckpointIDLabel] != "hash" {
 		t.Fatalf("expected checkpoint hash label, got %#v", labels)
 	}
@@ -42,17 +40,16 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
 		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
 	}
-	if _, ok := annotations[RestoreStatusAggregateAnnotation]; ok {
-		t.Fatalf("aggregate restore status annotation was not cleared: %#v", annotations)
-	}
 	for _, key := range []string{
 		RestoreStatusAnnotationFor("main"),
 		RestoreStatusAnnotationFor("engine-1"),
 		RestoreContainerIDAnnotationFor("main"),
 		RestoreContainerIDAnnotationFor("engine-1"),
+		"nvidia.com/snapshot-restore-status",
+		"nvidia.com/snapshot-restore-container-id",
 	} {
 		if _, ok := annotations[key]; ok {
-			t.Fatalf("per-container annotation %s was not cleared: %#v", key, annotations)
+			t.Fatalf("restore annotation %s was not cleared: %#v", key, annotations)
 		}
 	}
 	if got := annotations[TargetContainersAnnotation]; got != "main" {
@@ -62,22 +59,17 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 
 func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	labels := map[string]string{
-		RestoreTargetLabel: "true",
-		CheckpointIDLabel:  "hash",
+		CheckpointIDLabel: "hash",
 	}
 	annotations := map[string]string{
-		CheckpointArtifactVersionAnnotation:         "2",
-		CheckpointStatusAnnotation:                  "completed",
-		RestoreStatusAggregateAnnotation:            "failed",
-		RestoreStatusAnnotationFor("main"):          "failed",
-		RestoreContainerIDAnnotationFor("main"):     "dead-container",
+		CheckpointArtifactVersionAnnotation:     "2",
+		CheckpointStatusAnnotation:              "completed",
+		RestoreStatusAnnotationFor("main"):      "failed",
+		RestoreContainerIDAnnotationFor("main"): "dead-container",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
 
-	if _, ok := labels[RestoreTargetLabel]; ok {
-		t.Fatalf("restore target label was not cleared: %#v", labels)
-	}
 	if _, ok := labels[CheckpointIDLabel]; ok {
 		t.Fatalf("checkpoint hash label was not cleared: %#v", labels)
 	}
@@ -86,9 +78,6 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
 		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[RestoreStatusAggregateAnnotation]; ok {
-		t.Fatalf("aggregate restore status annotation was not cleared: %#v", annotations)
 	}
 	if _, ok := annotations[RestoreStatusAnnotationFor("main")]; ok {
 		t.Fatalf("per-container restore status was not cleared: %#v", annotations)

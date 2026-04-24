@@ -77,8 +77,8 @@ func NewNodeController(
 func (w *NodeController) Run(ctx context.Context) error {
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"checkpoint", snapshotprotocol.CheckpointSourceLabel,
-		"restore", snapshotprotocol.RestoreTargetLabel,
+		"checkpoint_source_label", snapshotprotocol.CheckpointSourceLabel,
+		"checkpoint_id_label", snapshotprotocol.CheckpointIDLabel,
 	)
 
 	var nsOptions []informers.SharedInformerOption
@@ -128,10 +128,15 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go ckptFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
-	// Restore informer
-	restoreSelector := labels.SelectorFromSet(labels.Set{
-		snapshotprotocol.RestoreTargetLabel: "true",
-	}).String()
+	// Restore informer: pods that carry a checkpoint-id label but are not
+	// themselves the checkpoint source. A single set-based selector
+	// expresses this without a dedicated "is restore target" boolean
+	// label parallel to the target-containers annotation.
+	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
+	if err != nil {
+		return fmt.Errorf("failed to build restore label selector: %w", err)
+	}
+	restoreSelector := restoreSel.String()
 
 	restoreFactoryOpts := append([]informers.SharedInformerOption{
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
@@ -290,11 +295,6 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 	for _, containerName := range targets {
 		w.maybeStartRestoreForContainer(ctx, pod, containerName, checkpointID, checkpointLocation, podKey)
 	}
-
-	// Aggregate rollup runs on the informer's single event loop, so it is
-	// the only writer of the aggregate annotation. Per-container workers
-	// only patch their own per-container keys.
-	w.reconcileRestoreAggregate(ctx, pod, targets)
 }
 
 // maybeStartRestoreForContainer handles one named target container in a
@@ -494,8 +494,12 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
 //  3. Write a restore-complete sentinel into the pod's snapshot-control
 //     volume to wake the workload (observed via inotify)
-//  4. Wait for the pod to become Ready
-//  5. Mark the container instance as completed
+//  4. Mark the container instance as completed
+//
+// Kubernetes readiness is gated separately: each restore-target container's
+// startup probe waits on the restore-complete sentinel, then its normal
+// readiness probe (if any) decides when the container is ready. The pod only
+// becomes Ready once every restored and cold-started container is ready.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
@@ -512,10 +516,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
-		// Per-container keys carry the authoritative status. The
-		// aggregate key is rolled up in a second pass by
-		// reconcileRestoreAggregate so concurrent per-container workers
-		// never race on a write to the same aggregate key.
 		annotations := map[string]string{
 			snapshotprotocol.RestoreStatusAnnotationFor(containerName):      value,
 			snapshotprotocol.RestoreContainerIDAnnotationFor(containerName): containerID,
@@ -578,19 +578,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
 	}
 
-	// Step 3: Wait for the pod to become Ready
-	if err := waitForPodReady(restoreCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
-		log.Error(err, "Restore post-sentinel readiness check failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore readiness failed"); killErr != nil {
-			log.Error(killErr, "Failed to kill placeholder after restore readiness failure")
-		}
-		return fmt.Errorf("restore post-sentinel readiness check failed: %w", err)
-	}
-
 	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointID))
 	if err := setRestoreStatus(snapshotprotocol.RestoreStatusCompleted); err != nil {
 		return err
@@ -612,61 +599,6 @@ func (w *NodeController) release(podKey string) {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, podKey)
-}
-
-// reconcileRestoreAggregate rolls the per-container restore statuses up into
-// snapshotprotocol.RestoreStatusAggregateAnnotation. It is driven by the
-// restore informer's single event loop, so it is the only writer of the
-// aggregate key and does not race with the concurrent per-container workers.
-//
-// Aggregation rules (restore targets are a hard-bounded set):
-//   - failed      if any target reports failed
-//   - completed   if every target reports completed
-//   - in_progress if any target reports in_progress or has no status yet
-//
-// The aggregate is only written when it actually changes, to keep the pod
-// from churning on repeated informer events.
-func (w *NodeController) reconcileRestoreAggregate(ctx context.Context, pod *corev1.Pod, targets []string) {
-	desired := snapshotprotocol.RestoreStatusInProgress
-	allCompleted := true
-	anyReported := false
-	for _, name := range targets {
-		status := pod.Annotations[snapshotprotocol.RestoreStatusAnnotationFor(name)]
-		switch status {
-		case snapshotprotocol.RestoreStatusFailed:
-			desired = snapshotprotocol.RestoreStatusFailed
-			allCompleted = false
-			anyReported = true
-		case snapshotprotocol.RestoreStatusCompleted:
-			anyReported = true
-		case snapshotprotocol.RestoreStatusInProgress:
-			allCompleted = false
-			anyReported = true
-		default:
-			allCompleted = false
-		}
-	}
-	if desired != snapshotprotocol.RestoreStatusFailed {
-		if allCompleted {
-			desired = snapshotprotocol.RestoreStatusCompleted
-		} else if !anyReported {
-			// No per-container worker has written a status yet; leave
-			// the aggregate alone.
-			return
-		}
-	}
-	current := pod.Annotations[snapshotprotocol.RestoreStatusAggregateAnnotation]
-	if current == desired {
-		return
-	}
-	if err := annotatePod(ctx, w.clientset, w.log, pod, map[string]string{
-		snapshotprotocol.RestoreStatusAggregateAnnotation: desired,
-	}); err != nil {
-		w.log.Error(err, "Failed to write aggregate restore status",
-			"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
-			"aggregate", desired,
-		)
-	}
 }
 
 func (w *NodeController) checkpointLocationFromPod(pod *corev1.Pod, checkpointID string) (string, error) {
