@@ -586,6 +586,10 @@ fn html_unescape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Cross-parser coverage of these scenarios also lives at
+    // `lib/parsers/src/tool_calling/test_cases/`. Keep these inline tests as
+    // the parser-specific regression moat; trim duplicated coverage once the
+    // contract suite stabilizes.
     use super::*;
     use rstest::rstest;
 
@@ -682,26 +686,6 @@ mod tests {
     #[case("&quot;quoted&quot;", "\"quoted\"", "quotes")]
     fn test_html_unescape(#[case] input: &str, #[case] expected: &str, #[case] _description: &str) {
         assert_eq!(html_unescape(input), expected);
-    }
-
-    #[test] // CASE.1
-    fn test_parse_simple_tool_call() {
-        let input = r#"<tool_call>
-<function=execute_bash>
-<parameter=command>
-pwd && ls
-</parameter>
-</function>
-</tool_call>"#;
-
-        let (calls, normal) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "execute_bash");
-        assert_eq!(normal, Some("".to_string()));
-
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["command"], "pwd && ls");
     }
 
     #[test] // CASE.1, CASE.7
