@@ -67,6 +67,16 @@ _VALID_BACKENDS = ("aiohttp", "httpx")
 _impl: ModuleType | None = None
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    return float(raw) if raw is not None and raw != "" else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw is not None and raw != "" else default
+
+
 def _resolve_backend() -> ModuleType:
     """Pick a backend module based on ``DYN_MM_HTTP_BACKEND``.
 
