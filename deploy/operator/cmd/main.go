@@ -67,6 +67,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -738,14 +739,27 @@ func registerWebhooks(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
+	// Internal-only escape hatch for the snapshot+GMS admission rule (#8689).
+	// Read once here and threaded into the validator handlers; we deliberately
+	// do not poll or honor mid-flight changes. Any value other than "1" — including
+	// unset — keeps the public reject behavior. INTERNAL TESTING ONLY: never
+	// enable on user-facing clusters; see consts.DynamoOperatorAllowGMSCheckpointEnvVar.
+	allowGMSCheckpoint := os.Getenv(consts.DynamoOperatorAllowGMSCheckpointEnvVar) == "1"
+	if allowGMSCheckpoint {
+		setupLog.Info(
+			"INTERNAL OVERRIDE: Checkpoint+GPUMemoryService admission rule disabled via env var; do NOT enable in production",
+			"envVar", consts.DynamoOperatorAllowGMSCheckpointEnvVar,
+		)
+	}
+
 	setupLog.Info("Registering validation webhooks")
 
-	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler(allowGMSCheckpoint)
 	if err := dcdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled, allowGMSCheckpoint)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

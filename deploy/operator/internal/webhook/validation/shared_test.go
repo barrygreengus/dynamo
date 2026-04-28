@@ -46,8 +46,14 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 		spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
 		fieldPath           string
 		calculatedNamespace string
-		wantErr             bool
-		errMsg              string
+		// allowGMSCheckpoint mirrors the operator-level
+		// DYN_OPERATOR_ALLOW_GMS_CHECKPOINT bypass; when true, the
+		// SharedSpecValidator's Checkpoint+GPUMemoryService rule should
+		// short-circuit to nil. Default false preserves the public reject
+		// contract from #8689.
+		allowGMSCheckpoint bool
+		wantErr            bool
+		errMsg             string
 	}{
 		{
 			name: "valid spec with all fields",
@@ -255,6 +261,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
 		},
 		{
+			// Default operator config (DYN_OPERATOR_ALLOW_GMS_CHECKPOINT
+			// unset) — the public reject contract from #8689. This is the
+			// regression baseline for ordinary user CRs.
 			name: "checkpoint with gpuMemoryService is temporarily rejected",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
@@ -275,6 +284,40 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
 			errMsg:              "spec.services[worker].checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; disable either checkpointing or gpuMemoryService for this service",
+		},
+		{
+			// Same shape as the case above with the operator-level bypass
+			// flag set (e.g., DYN_OPERATOR_ALLOW_GMS_CHECKPOINT=1 in
+			// internal test clusters). The Checkpoint+GMS combination
+			// should be admitted; every other admission rule is unchanged.
+			// This is the failover-wiring path from PR #8631 — the
+			// intra-pod failover.mode=intraPod fixture is the natural shape
+			// because IsIntraPodFailoverEnabled requires GPUMemoryService.
+			name: "checkpoint with gpuMemoryService is accepted when bypass is enabled (intra-pod failover shape)",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 1,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			allowGMSCheckpoint:  true,
+			wantErr:             false,
 		},
 		{
 			name: "checkpoint without gpuMemoryService is accepted",
@@ -361,7 +404,8 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace).
+				WithAllowGMSCheckpoint(tt.allowGMSCheckpoint)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {

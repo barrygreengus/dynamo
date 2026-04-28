@@ -22,6 +22,21 @@
 upgradeCRD: true
 
 # Environment variables to pass to operator Deployment.
+#
+# Internal-only escape hatches recognized by the operator binary:
+#
+#   - DYN_OPERATOR_ALLOW_GMS_CHECKPOINT: set to "1" to disable the admission
+#     rule that rejects spec.checkpoint.enabled=true together with
+#     spec.gpuMemoryService.enabled=true (added by #8689). NOT FOR PRODUCTION
+#     — only intended for internal failover-wiring tests while the underlying
+#     GPU driver path is being stabilized. Any value other than "1" — including
+#     unset — keeps the rule active. Read once at operator startup; mid-flight
+#     changes are not honored.
+#
+# Example (internal test cluster only):
+#   env:
+#     - name: DYN_OPERATOR_ALLOW_GMS_CHECKPOINT
+#       value: "1"
 env: []
 
 # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.

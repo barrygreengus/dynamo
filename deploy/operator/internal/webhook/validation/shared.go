@@ -40,6 +40,13 @@ type SharedSpecValidator struct {
 	fieldPath           string       // e.g., "spec" for DCD, "spec.services[foo]" for DGD
 	calculatedNamespace string       // The namespace that will be used: {k8s_namespace}-{dgd_name}
 	mgr                 ctrl.Manager // Optional: for API group detection via discovery client
+
+	// allowGMSCheckpoint, when true, disables the admission rule that rejects
+	// Checkpoint.Enabled && GPUMemoryService.Enabled. Sourced from the operator
+	// pod's DYN_OPERATOR_ALLOW_GMS_CHECKPOINT env var (consts.DynamoOperatorAllowGMSCheckpointEnvVar).
+	// Internal testing only — never enabled in user-facing clusters. Default false
+	// preserves the public reject behavior introduced in #8689.
+	allowGMSCheckpoint bool
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
@@ -65,6 +72,16 @@ func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDe
 		calculatedNamespace: calculatedNamespace,
 		mgr:                 mgr,
 	}
+}
+
+// WithAllowGMSCheckpoint sets the internal-only bypass flag for the
+// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule and returns
+// the receiver for fluent chaining. Default (unset) is false, which preserves
+// the public reject behavior. Threaded from cmd/main.go's reading of
+// DYN_OPERATOR_ALLOW_GMS_CHECKPOINT at operator startup.
+func (v *SharedSpecValidator) WithAllowGMSCheckpoint(allow bool) *SharedSpecValidator {
+	v.allowGMSCheckpoint = allow
+	return v
 }
 
 // Validate performs validation on the shared spec fields.
@@ -419,6 +436,15 @@ func (v *SharedSpecValidator) validateCheckpointWithGPUMemoryService() error {
 		return nil
 	}
 	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return nil
+	}
+
+	// Internal-only bypass for the rule below. Sourced from the operator's
+	// DYN_OPERATOR_ALLOW_GMS_CHECKPOINT env var via WithAllowGMSCheckpoint.
+	// All other admission rules (failover, GMS layout, EPP, etc.) keep firing
+	// — only this single combination is unlocked for internal failover-wiring
+	// tests. See consts.DynamoOperatorAllowGMSCheckpointEnvVar for caveats.
+	if v.allowGMSCheckpoint {
 		return nil
 	}
 

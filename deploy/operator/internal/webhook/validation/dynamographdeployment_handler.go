@@ -44,17 +44,29 @@ type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
 	operatorPrincipal string
 	groveEnabled      bool
+
+	// allowGMSCheckpoint is the operator-pod-scoped bypass flag for the
+	// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule. Captured
+	// once at handler construction (i.e., once at operator startup) and
+	// forwarded to every validator the handler creates. See
+	// consts.DynamoOperatorAllowGMSCheckpointEnvVar.
+	allowGMSCheckpoint bool
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
 // replica changes on scaling-adapter-enabled services (#7656).
 // groveEnabled reflects the operator's runtime config (global.grove.enabled).
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool) *DynamoGraphDeploymentHandler {
+// allowGMSCheckpoint controls the internal-only bypass for the
+// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule. Sourced from
+// the operator pod's DYN_OPERATOR_ALLOW_GMS_CHECKPOINT env var at startup;
+// false on user-facing clusters keeps the rule active.
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool, allowGMSCheckpoint bool) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
-		mgr:               mgr,
-		operatorPrincipal: operatorPrincipal,
-		groveEnabled:      groveEnabled,
+		mgr:                mgr,
+		operatorPrincipal:  operatorPrincipal,
+		groveEnabled:       groveEnabled,
+		allowGMSCheckpoint: allowGMSCheckpoint,
 	}
 }
 
@@ -70,7 +82,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled).
+		WithAllowGMSCheckpoint(h.allowGMSCheckpoint)
 	return validator.Validate(ctx)
 }
 
@@ -97,7 +110,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled).
+		WithAllowGMSCheckpoint(h.allowGMSCheckpoint)
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err

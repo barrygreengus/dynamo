@@ -39,11 +39,24 @@ const (
 
 // DynamoComponentDeploymentHandler is a handler for validating DynamoComponentDeployment resources.
 // It is a thin wrapper around DynamoComponentDeploymentValidator.
-type DynamoComponentDeploymentHandler struct{}
+type DynamoComponentDeploymentHandler struct {
+	// allowGMSCheckpoint is the operator-pod-scoped bypass flag for the
+	// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule. Captured
+	// once at handler construction (i.e., once at operator startup) and
+	// forwarded to every validator the handler creates. See
+	// consts.DynamoOperatorAllowGMSCheckpointEnvVar.
+	allowGMSCheckpoint bool
+}
 
 // NewDynamoComponentDeploymentHandler creates a new handler for DynamoComponentDeployment Webhook.
-func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
-	return &DynamoComponentDeploymentHandler{}
+// allowGMSCheckpoint controls the internal-only bypass for the
+// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule. Sourced from
+// the operator pod's DYN_OPERATOR_ALLOW_GMS_CHECKPOINT env var at startup;
+// false on user-facing clusters keeps the rule active.
+func NewDynamoComponentDeploymentHandler(allowGMSCheckpoint bool) *DynamoComponentDeploymentHandler {
+	return &DynamoComponentDeploymentHandler{
+		allowGMSCheckpoint: allowGMSCheckpoint,
+	}
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
@@ -58,7 +71,8 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator and perform validation
-	validator := NewDynamoComponentDeploymentValidator(deployment)
+	validator := NewDynamoComponentDeploymentValidator(deployment).
+		WithAllowGMSCheckpoint(h.allowGMSCheckpoint)
 	return validator.Validate(ctx)
 }
 
@@ -85,7 +99,8 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 	}
 
 	// Create validator and perform validation
-	validator := NewDynamoComponentDeploymentValidator(newDeployment)
+	validator := NewDynamoComponentDeploymentValidator(newDeployment).
+		WithAllowGMSCheckpoint(h.allowGMSCheckpoint)
 
 	// Validate stateless rules
 	warnings, err := validator.Validate(ctx)

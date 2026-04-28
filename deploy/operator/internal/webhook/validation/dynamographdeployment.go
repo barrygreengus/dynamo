@@ -56,6 +56,11 @@ type DynamoGraphDeploymentValidator struct {
 	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
 	mgr          ctrl.Manager // Optional: for API group detection via discovery client
 	groveEnabled bool
+
+	// allowGMSCheckpoint mirrors the SharedSpecValidator field; see
+	// SharedSpecValidator.WithAllowGMSCheckpoint for the semantics. Forwarded
+	// to every per-service SharedSpecValidator created during Validate.
+	allowGMSCheckpoint bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
@@ -74,6 +79,15 @@ func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.
 		mgr:          mgr,
 		groveEnabled: groveEnabled,
 	}
+}
+
+// WithAllowGMSCheckpoint sets the operator-wide bypass for the
+// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule and returns
+// the receiver for fluent chaining. The flag is forwarded to every
+// per-service SharedSpecValidator constructed during Validate.
+func (v *DynamoGraphDeploymentValidator) WithAllowGMSCheckpoint(allow bool) *DynamoGraphDeploymentValidator {
+	v.allowGMSCheckpoint = allow
+	return v
 }
 
 // Validate performs validation on the DynamoGraphDeployment.
@@ -378,6 +392,7 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	} else {
 		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
 	}
+	sharedValidator.WithAllowGMSCheckpoint(v.allowGMSCheckpoint)
 
 	return sharedValidator.Validate(ctx)
 }

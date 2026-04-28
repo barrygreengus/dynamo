@@ -29,6 +29,12 @@ import (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoComponentDeploymentValidator struct {
 	deployment *nvidiacomv1alpha1.DynamoComponentDeployment
+
+	// allowGMSCheckpoint mirrors the SharedSpecValidator field; see
+	// SharedSpecValidator.WithAllowGMSCheckpoint for the semantics. Threaded
+	// through here so DCD admission honors the same operator-level bypass
+	// flag as DGD admission.
+	allowGMSCheckpoint bool
 }
 
 // NewDynamoComponentDeploymentValidator creates a new validator for DynamoComponentDeployment.
@@ -38,13 +44,23 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 	}
 }
 
+// WithAllowGMSCheckpoint sets the operator-wide bypass for the
+// Checkpoint.Enabled && GPUMemoryService.Enabled admission rule and returns
+// the receiver for fluent chaining. The flag is forwarded to the
+// SharedSpecValidator constructed during Validate.
+func (v *DynamoComponentDeploymentValidator) WithAllowGMSCheckpoint(allow bool) *DynamoComponentDeploymentValidator {
+	v.allowGMSCheckpoint = allow
+	return v
+}
+
 // Validate performs stateless validation on the DynamoComponentDeployment.
 // Context is required for operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings and error.
 func (v *DynamoComponentDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
 	calculatedNamespace := v.deployment.GetDynamoNamespace()
-	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace)
+	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace).
+		WithAllowGMSCheckpoint(v.allowGMSCheckpoint)
 
 	// DCD-specific validation would go here (currently none)
 

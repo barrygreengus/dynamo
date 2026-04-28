@@ -72,6 +72,17 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
+	// DynamoOperatorAllowGMSCheckpointEnvVar is read once at operator startup
+	// (in cmd/main.go) and threaded into the validator construction. When set
+	// to exactly "1" it disables the SharedSpecValidator admission rule that
+	// rejects Checkpoint.Enabled && GPUMemoryService.Enabled (added by #8689).
+	//
+	// INTERNAL TESTING ONLY. The admission rule exists because the underlying
+	// GPU driver path for snapshot+GMS is still being stabilized (#8689). Do
+	// NOT set this on user-facing clusters. Any value other than "1" — including
+	// unset — leaves the rule active.
+	DynamoOperatorAllowGMSCheckpointEnvVar = "DYN_OPERATOR_ALLOW_GMS_CHECKPOINT"
+
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"

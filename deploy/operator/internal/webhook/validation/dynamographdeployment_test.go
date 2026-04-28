@@ -43,9 +43,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		name         string
 		deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
 		groveEnabled bool
-		wantErr      bool
-		errMsg       string
-		errContains  bool
+		// allowGMSCheckpoint mirrors the operator-level
+		// DYN_OPERATOR_ALLOW_GMS_CHECKPOINT bypass flag. Default false
+		// preserves the public reject behavior from #8689.
+		allowGMSCheckpoint bool
+		wantErr            bool
+		errMsg             string
+		errContains        bool
 	}{
 		{
 			name: "valid deployment with services",
@@ -812,6 +816,53 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr:     true,
 			errContains: true,
 			errMsg:      "checkpointing with gpuMemoryService is temporarily disabled",
+		},
+		{
+			// PR #8631 follow-on: with the operator-level bypass flag set
+			// (DYN_OPERATOR_ALLOW_GMS_CHECKPOINT=1 in internal test
+			// clusters), the same intra-pod failover shape — Checkpoint +
+			// intra-pod GMS + Failover.Mode=intraPod, which the new
+			// container-annotations wiring needs — must admit cleanly.
+			// The annotation is required by validateFailoverRequiresDiscoveryMode.
+			name: "intra-pod failover with checkpoint+GMS is accepted when bypass is enabled",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-intrapod-failover-bypass",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoKubeDiscoveryMode: "container",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+								Enabled: true,
+								Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+									Model:            "model",
+									BackendFramework: "vllm",
+								},
+							},
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+							},
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			allowGMSCheckpoint: true,
+			wantErr:            false,
 		},
 		{
 			name:         "GMS failover without GPU",
@@ -1598,7 +1649,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, tt.groveEnabled)
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, tt.groveEnabled).
+				WithAllowGMSCheckpoint(tt.allowGMSCheckpoint)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {

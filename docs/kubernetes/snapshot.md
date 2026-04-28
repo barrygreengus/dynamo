@@ -350,6 +350,8 @@ If you are upgrading from a Dynamo release before the annotation contract landed
 
 Dynamo supports two distinct failover topologies. Both are orthogonal to the snapshot-target-containers contract; the operator does the right thing for each, and users only care about the annotation directly when driving `snapshotctl`.
 
+> ⚠️ **Snapshot + GPU Memory Service is currently rejected at admission.** Configurations that set both `spec.checkpoint.enabled=true` and `spec.gpuMemoryService.enabled=true` (which includes every `failover.mode: intraPod` config and every `failover.mode: interPod` config) are rejected by the operator's validating webhook with `checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues`. The combination is being stabilized; see the [Internal-only override](#internal-only-override-for-snapshot--gms-not-for-production) below for the escape hatch used in internal testing.
+
 ### Intra-pod failover (`failover.mode: intraPod`)
 
 The operator clones the main container into `engine-0` and `engine-1` (primary + shadow) inside a single pod. Checkpoint is still single-container, captured against `main` in a standalone checkpoint Job; restore replays that same checkpoint into both engine containers concurrently. The operator stamps `nvidia.com/snapshot-target-containers = "engine-0,engine-1"` on the restore pod, and the snapshot agent writes per-container status annotations and per-container `restore-complete` sentinels as each engine is restored.
@@ -359,6 +361,42 @@ The `snapshot-control` emptyDir is mounted into each engine with `subPath: <cont
 ### Inter-pod failover (`failover.mode: interPod`)
 
 The operator creates one primary engine pod plus `failover.numShadows` shadow engine pods per rank, each with a single `main` container, alongside a dedicated GMS weight-server pod per rank. Each engine pod is an independent snapshot restore target and gets its own `nvidia.com/snapshot-target-containers = "main"` stamp; the snapshot agent restores each pod independently. GMS weight-server pods are never shaped as restore targets — they run `gpu_memory_service.cli.server` and load weights fresh from disk.
+
+### Internal-only override for snapshot + GMS (NOT FOR PRODUCTION)
+
+> ⚠️ **Internal use only.** This flag exists so the failover wiring above can be exercised in NVIDIA-internal test clusters while the underlying GPU driver path for snapshot + GMS is being stabilized. Do **not** set it on user-facing clusters. The admission rule will be removed entirely once the driver path is fixed; until then, the public contract is "snapshot + GMS is rejected by the webhook."
+
+The operator pod recognizes a single environment variable that disables the
+admission rule:
+
+| Variable | Effect |
+|----------|--------|
+| `DYN_OPERATOR_ALLOW_GMS_CHECKPOINT=1` | Webhook returns `nil` for the snapshot + GMS combination. Every other admission rule in `SharedSpecValidator` (failover topology matching, GMS layout, EPP constraints, …) keeps firing. |
+| anything else (incl. unset) | Default. Webhook rejects `Checkpoint.Enabled && GPUMemoryService.Enabled` exactly as today. |
+
+The variable is read **once at operator startup** and threaded into the
+validator construction. Changing the value at runtime has no effect; the
+operator pod must be restarted for a new value to take effect.
+
+When deploying via the bundled Helm chart (`deploy/helm/charts/platform/components/operator`), set it on the operator deployment via `.Values.env`:
+
+```yaml
+dynamo-operator:
+  env:
+    - name: DYN_OPERATOR_ALLOW_GMS_CHECKPOINT
+      value: "1"
+```
+
+When deploying via the raw kustomize manifest under
+`deploy/operator/config/manager/`, add the variable to the manager container's
+`env:` list directly. Either way, restart the operator pod after the change.
+
+When the override is active the operator emits the following log line at
+startup so the deviation is visible in operator logs:
+
+```text
+INTERNAL OVERRIDE: Checkpoint+GPUMemoryService admission rule disabled via env var; do NOT enable in production
+```
 
 ## Lower-Level Testing With `snapshotctl`
 
