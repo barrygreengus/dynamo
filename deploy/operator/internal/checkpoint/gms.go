@@ -27,10 +27,18 @@ const (
 	envCheckpointDir = "GMS_CHECKPOINT_DIR"
 )
 
-// EnsureGMSRestoreSidecars adds GMS server + loader containers to the pod spec
-// for a checkpoint restore. The server runs as a regular container (not init)
-// because the CRIU-restored main process already has GPU memory mapped and
-// all containers must start in parallel.
+// EnsureGMSRestoreSidecars appends GMS server + loader containers to the pod
+// spec for a checkpoint restore. Both are appended to InitContainers with
+// RestartPolicy=Always — i.e. they are Kubernetes 1.28+ "init sidecars": init
+// containers that run forever and parallelize with the regular containers
+// that follow them, gating pod-Ready via their own startup probes.
+//
+// They cannot be plain regular containers because the engine's restore-target
+// container (whose Command/Args we replaced with `sleep infinity` and whose
+// readiness is gated by the synthesized restore StartupProbe) needs the GMS
+// server's UDS sockets to exist *before* CRIU resumes the workload's process.
+// Init-sidecar ordering gives us "GMS up before engine is Ready" without
+// blocking other regular containers from starting.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -40,9 +48,9 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	// The DGD path adds the GMS server as an init sidecar (blocks until
-	// sockets are ready). For restore, move it to a regular container so
-	// all containers start in parallel.
+	// The DGD path already added gms-server as an init sidecar. Drop the
+	// existing entry so we can re-append both gms-server and gms-loader as
+	// init sidecars below in a deterministic order.
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == gms.ServerContainerName {
 			podSpec.InitContainers = append(podSpec.InitContainers[:i], podSpec.InitContainers[i+1:]...)

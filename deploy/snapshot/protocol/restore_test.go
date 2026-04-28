@@ -323,7 +323,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
-func TestPrepareRestorePodSpecUsesRestoreStartupGateWithLiveness(t *testing.T) {
+func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: "/livez"},
@@ -353,9 +353,18 @@ func TestPrepareRestorePodSpecUsesRestoreStartupGateWithLiveness(t *testing.T) {
 		t.Fatalf("expected startup probe to gate restore completion")
 	}
 	assertRestoreStartupGate(t, container.StartupProbe)
+	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
+		t.Fatalf("expected synthesized startup probe to inherit liveness HTTPGet handler, got %#v", container.StartupProbe)
+	}
+	if got := container.StartupProbe.PeriodSeconds; got != livenessProbe.PeriodSeconds {
+		t.Fatalf("expected startup PeriodSeconds %d (from liveness), got %d", livenessProbe.PeriodSeconds, got)
+	}
+	if got := container.StartupProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
+		t.Fatalf("expected startup TimeoutSeconds %d (from liveness), got %d", livenessProbe.TimeoutSeconds, got)
+	}
 }
 
-func TestPrepareRestorePodSpecUsesRestoreStartupGateWithReadiness(t *testing.T) {
+func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
 	readinessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{Command: []string{"cat", "/tmp/ready"}},
@@ -388,24 +397,61 @@ func TestPrepareRestorePodSpecUsesRestoreStartupGateWithReadiness(t *testing.T) 
 		t.Fatalf("expected startup probe to gate restore completion")
 	}
 	assertRestoreStartupGate(t, container.StartupProbe)
+	if container.StartupProbe.Exec == nil || len(container.StartupProbe.Exec.Command) != 2 ||
+		container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
+		t.Fatalf("expected synthesized startup probe to inherit readiness Exec command, got %#v", container.StartupProbe)
+	}
+	if got := container.StartupProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
+		t.Fatalf("expected startup PeriodSeconds %d (from readiness), got %d", readinessProbe.PeriodSeconds, got)
+	}
 }
 
-func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
-	t.Helper()
-	if probe == nil || probe.Exec == nil {
-		t.Fatalf("expected exec startup probe, got %#v", probe)
+func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:    "main",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:    []string{"--model", "Qwen"},
+		}},
 	}
-	want := []string{"cat", "/snapshot-control/restore-complete"}
-	if len(probe.Exec.Command) != len(want) {
-		t.Fatalf("startup probe command = %#v, want %#v", probe.Exec.Command, want)
+
+	if err := PrepareRestorePodSpec(&podSpec, map[string]string{TargetContainersAnnotation: "main"}, Storage{}, "", true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec error: %v", err)
+	}
+
+	container := &podSpec.Containers[0]
+	if container.StartupProbe == nil {
+		t.Fatalf("expected sentinel-cat fallback startup probe to be installed")
+	}
+	assertRestoreStartupGate(t, container.StartupProbe)
+	if container.StartupProbe.Exec == nil {
+		t.Fatalf("expected fallback startup probe to use Exec handler, got %#v", container.StartupProbe)
+	}
+	want := []string{"cat", SnapshotControlMountPath + "/" + RestoreCompleteFile}
+	if len(container.StartupProbe.Exec.Command) != len(want) {
+		t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 	}
 	for i := range want {
-		if probe.Exec.Command[i] != want[i] {
-			t.Fatalf("startup probe command = %#v, want %#v", probe.Exec.Command, want)
+		if container.StartupProbe.Exec.Command[i] != want[i] {
+			t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 		}
 	}
-	if got := probe.PeriodSeconds; got != 1 {
-		t.Fatalf("expected startup period 1, got %d", got)
+	if got := container.StartupProbe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected fallback startup PeriodSeconds=1, got %d", got)
+	}
+}
+
+// assertRestoreStartupGate verifies the threshold invariants every restore
+// StartupProbe must satisfy: FailureThreshold=MaxInt32 (effectively infinite
+// retries during CRIU restore) and SuccessThreshold=1. The handler shape is
+// not checked here because ensureRestoreStartupProbe synthesizes the probe
+// from whatever Startup/Liveness/Readiness handler the workload defined; only
+// when no user probe is present does it fall back to the sentinel-cat exec
+// probe (covered by assertSentinelRestoreStartupGate).
+func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
+	t.Helper()
+	if probe == nil {
+		t.Fatalf("expected non-nil startup probe")
 	}
 	if got := probe.FailureThreshold; got != math.MaxInt32 {
 		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
@@ -506,10 +552,19 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected missing restore startup probe error, got %v", err)
 	}
 
-	badSpec = podSpec.DeepCopy()
-	badSpec.Containers[0].StartupProbe.Exec.Command = []string{"cat", "/tmp/not-restore-complete"}
-	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing restore-complete startup probe on container "main"` {
-		t.Fatalf("expected wrong restore startup probe error, got %v", err)
+	// A non-sentinel startup probe is now accepted: ensureRestoreStartupProbe
+	// synthesizes the probe from the workload's existing Startup/Liveness/
+	// Readiness handler, so the validator only checks for presence, not a
+	// fixed exec-command shape. Only fully-missing probes are rejected.
+	okSpec := podSpec.DeepCopy()
+	okSpec.Containers[0].StartupProbe = &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/livez"}},
+		PeriodSeconds:    5,
+		FailureThreshold: math.MaxInt32,
+		SuccessThreshold: 1,
+	}
+	if err := ValidateRestorePodSpec(okSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("expected synthesized HTTPGet startup probe to validate, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()

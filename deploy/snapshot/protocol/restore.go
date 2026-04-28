@@ -98,38 +98,76 @@ func PrepareRestorePodSpec(
 	return nil
 }
 
+// ensureRestoreStartupProbe installs a StartupProbe that pauses kubelet's
+// readiness check until CRIU restore completes.
+//
+// The probe is synthesized in two ways:
+//
+//   - **Synthesis from existing probe (preferred).** If the container already
+//     defines a StartupProbe, LivenessProbe, or ReadinessProbe (in that order
+//     of preference), we deep-copy it and set FailureThreshold=MaxInt32 +
+//     SuccessThreshold=1. The kubelet then runs the workload's *own* probe
+//     with effectively-infinite retries during restore — the same shape the
+//     non-failover restore path on main has used since #8403.
+//
+//   - **Sentinel-file fallback.** If the container has no Startup/Liveness/
+//     Readiness probes at all, kubelet would otherwise mark the `sleep
+//     infinity` placeholder Ready immediately and route traffic to a process
+//     that hasn't been CRIUed yet. To avoid that regression we install an
+//     exec probe that watches for the agent-written `restore-complete`
+//     sentinel file in the per-container `/snapshot-control` subPath.
+//
+// The sentinel file is also written by the agent in the synthesis case (the
+// workload's `_wait_for_sentinel` poller in components/src/dynamo/common/
+// utils/snapshot.py uses it to know when CRIU has placed it back), so the
+// signal is the same; only the kubelet-visible probe shape differs.
 func ensureRestoreStartupProbe(container *corev1.Container) {
-	container.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: restoreStartupProbeCommand(),
-			},
-		},
-		PeriodSeconds:    1,
-		FailureThreshold: math.MaxInt32,
-		SuccessThreshold: 1,
+	startup := container.StartupProbe
+	if startup == nil {
+		startup = container.LivenessProbe
+		if startup == nil {
+			startup = container.ReadinessProbe
+		}
 	}
+	if startup == nil {
+		// No user probe — install the sentinel-cat probe as a blocking
+		// fallback so kubelet does not mark `sleep infinity` Ready before
+		// CRIU completes.
+		container.StartupProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: restoreStartupProbeCommand(),
+				},
+			},
+			PeriodSeconds:    1,
+			FailureThreshold: math.MaxInt32,
+			SuccessThreshold: 1,
+		}
+		return
+	}
+
+	startup = startup.DeepCopy()
+	startup.FailureThreshold = math.MaxInt32
+	startup.SuccessThreshold = 1
+	container.StartupProbe = startup
 }
 
+// restoreStartupProbeCommand is the no-probe-fallback exec command — it cats
+// the per-container `restore-complete` sentinel file written by the snapshot
+// agent after CRIU completes. Only used when the workload defines no
+// Startup/Liveness/Readiness probe; in the common case ensureRestoreStartupProbe
+// synthesizes the user's own probe with FailureThreshold=MaxInt32.
 func restoreStartupProbeCommand() []string {
 	return []string{"cat", filepath.Join(SnapshotControlMountPath, RestoreCompleteFile)}
 }
 
+// hasRestoreStartupProbe reports whether the given probe is non-nil. Used by
+// ValidateRestorePodSpec to verify that ensureRestoreStartupProbe ran on
+// every restore-target container. It is intentionally a presence check, not
+// a shape check, because the synthesized probe inherits whatever handler the
+// workload defined (Exec / HTTPGet / TCPSocket / GRPC).
 func hasRestoreStartupProbe(probe *corev1.Probe) bool {
-	if probe == nil || probe.Exec == nil {
-		return false
-	}
-	got := probe.Exec.Command
-	want := restoreStartupProbeCommand()
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
+	return probe != nil
 }
 
 // ValidateRestorePodSpec verifies that a pod spec is shaped correctly for

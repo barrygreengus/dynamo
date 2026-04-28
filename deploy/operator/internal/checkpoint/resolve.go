@@ -39,10 +39,24 @@ type CheckpointInfo struct {
 	// RestoreTargetContainers is the list of container names in the
 	// restore pod that the snapshot agent should restore the checkpoint
 	// into. Empty means "use the default target" (the container named
-	// commonconsts.MainContainerName). The failover path populates this
-	// with engine-0/engine-1 so the agent restores the same checkpoint
-	// into both the primary and the shadow engine.
+	// commonconsts.MainContainerName). The intra-pod-failover path
+	// populates this with engine-0/engine-1 so the agent restores the
+	// same checkpoint into both the primary and the shadow engine; see
+	// ApplyFailoverTargets.
 	RestoreTargetContainers []string
+}
+
+// ApplyFailoverTargets overrides RestoreTargetContainers with the given
+// container names when names is non-empty. It is a no-op when names is empty,
+// which preserves whatever default ("main") restoreTargetsOrDefault picks
+// downstream. Used by the DGD/DCD controllers to fold the intra-pod-failover
+// engine names (engine-0/engine-1) into the resolved CheckpointInfo without
+// duplicating the override logic at every call site.
+func (info *CheckpointInfo) ApplyFailoverTargets(names []string) {
+	if info == nil || len(names) == 0 {
+		return
+	}
+	info.RestoreTargetContainers = names
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {

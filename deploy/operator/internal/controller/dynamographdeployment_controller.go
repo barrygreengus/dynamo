@@ -1363,7 +1363,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		// failover keeps a single main container per engine pod and does
 		// not need this override.
 		if dynamo.IsIntraPodFailoverEnabled(component) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+			info.ApplyFailoverTargets(dynamo.IntraPodFailoverEngineContainerNames())
 		}
 
 		// Store checkpoint info for later use in pod spec generation

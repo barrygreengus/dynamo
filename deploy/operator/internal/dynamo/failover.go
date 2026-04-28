@@ -397,24 +397,26 @@ const (
 	failoverEngineCount = 2
 )
 
-// IsFailoverEnabled returns true only for intra-pod failover mode, where the
-// main container is cloned into active + standby containers within the same pod.
-// Inter-pod failover (Mode=interPod) is handled separately via expandRolesForService
-// and generatePodSpecForRole — it does not use container cloning.
+// IsIntraPodFailoverEnabled returns true only for intra-pod failover mode,
+// where the main container is cloned into active + standby containers within
+// the same pod. Inter-pod failover (Mode=interPod) is handled separately via
+// expandRolesForService and generatePodSpecForRole — it does not use
+// container cloning, so the checkpoint/restore wiring keeps the default
+// single-target ("main") shape.
 //
 // Exported because the checkpoint/restore wiring in the deployment controllers
 // uses it to populate the per-container snapshot-target-containers annotation
 // for cloned engine pods.
-func IsFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+func IsIntraPodFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
 	return component.Failover != nil && component.Failover.Enabled &&
 		component.Failover.Mode == v1alpha1.GMSModeIntraPod
 }
 
-// FailoverEngineContainerNames returns the container names produced by the
-// failover pod transform, in order. Used by the checkpoint/restore wiring
-// to stamp the snapshot-target-containers annotation so the snapshot agent
-// restores the single checkpoint into every engine in the pod.
-func FailoverEngineContainerNames() []string {
+// IntraPodFailoverEngineContainerNames returns the container names produced
+// by the intra-pod failover pod transform, in order. Used by the checkpoint/
+// restore wiring to stamp the snapshot-target-containers annotation so the
+// snapshot agent restores the single checkpoint into every engine in the pod.
+func IntraPodFailoverEngineContainerNames() []string {
 	names := make([]string, 0, failoverEngineCount)
 	for i := 0; i < failoverEngineCount; i++ {
 		names = append(names, fmt.Sprintf("engine-%d", i))

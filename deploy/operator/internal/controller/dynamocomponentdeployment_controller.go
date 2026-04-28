@@ -1066,7 +1066,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		// failover keeps a single main container per engine pod and does
 		// not need this override.
 		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+			info.ApplyFailoverTargets(dynamo.IntraPodFailoverEngineContainerNames())
 		}
 		checkpointInfo = info
 	}
