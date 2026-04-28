@@ -97,9 +97,6 @@ def _per_call_timeout(read_timeout: float) -> httpx.Timeout:
 
 def _build_client() -> httpx.AsyncClient:
     cfg = _get_config()
-    # The singleton's default timeout is overridden on every request by
-    # per-call ``httpx.Timeout(...)`` passed to ``client.get(...)``; we set a
-    # conservative default here only for direct callers of ``get_raw_client``.
     return httpx.AsyncClient(
         timeout=_per_call_timeout(60.0),
         follow_redirects=True,
@@ -196,18 +193,3 @@ async def close() -> None:
             await _client.aclose()
         _client = None
         _config = None
-
-
-def get_raw_client(timeout: float) -> httpx.AsyncClient:
-    """Return the underlying ``httpx.AsyncClient`` (creating it if needed).
-
-    Synchronous accessor for back-compat. The ``timeout`` parameter is
-    retained for ABI but unused — the session uses per-request timeouts and
-    callers who want a specific budget should pass ``timeout=httpx.Timeout(...)``
-    directly on each ``.get(...)``.
-    """
-    _ = timeout  # legacy ABI; actual timeouts are per-request
-    global _client
-    if _client is None or _client.is_closed:
-        _client = _build_client()
-    return _client

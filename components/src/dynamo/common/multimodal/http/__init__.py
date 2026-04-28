@@ -18,10 +18,6 @@ For SSRF-safe fetches (e.g. from ``ImageLoader``) pass a
 manually and revalidates each hop against the policy, matching the
 behavior of the old httpx-only ``url_validator.fetch_with_revalidation``
 but backend-neutrally.
-
-:func:`get_http_client` is kept as a back-compat symbol; it always
-returns an ``httpx.AsyncClient`` regardless of the selected backend
-(unused in-tree after ImageLoader migrated to :func:`fetch_bytes`).
 """
 
 from __future__ import annotations
@@ -29,7 +25,6 @@ from __future__ import annotations
 import logging
 import os
 from types import ModuleType
-from typing import Any
 
 from ..url_validator import (
     UrlValidationError,
@@ -169,18 +164,6 @@ async def close_http_client() -> None:
     _impl = None
 
 
-def get_http_client(timeout: float = 60.0) -> Any:
-    """Back-compat: return the shared ``httpx.AsyncClient``.
-
-    Always returns an ``httpx.AsyncClient`` regardless of
-    ``DYN_MM_HTTP_BACKEND``. Kept for out-of-tree consumers that imported
-    this symbol before the facade switch; no in-tree code calls it after
-    ImageLoader migrated to :func:`fetch_bytes`.
-    """
-    from . import httpx_backend
-    return httpx_backend.get_raw_client(timeout)
-
-
 __all__ = [
     "MmHttpError",
     "MmHttpTimeout",
@@ -188,5 +171,4 @@ __all__ = [
     "MmHttpStatusError",
     "fetch_bytes",
     "close_http_client",
-    "get_http_client",
 ]

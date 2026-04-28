@@ -51,22 +51,6 @@ async def test_invalid_backend_raises(monkeypatch) -> None:
         mm_http._resolve_backend()
 
 
-# --- get_http_client always returns httpx (url_validator contract) ---
-
-
-async def test_get_http_client_returns_httpx_under_httpx_backend(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
-    client = mm_http.get_http_client(timeout=30.0)
-    assert isinstance(client, httpx.AsyncClient)
-
-
-async def test_get_http_client_returns_httpx_under_aiohttp_backend(monkeypatch) -> None:
-    """``get_http_client`` must always return httpx — url_validator requires it."""
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "aiohttp")
-    client = mm_http.get_http_client(timeout=30.0)
-    assert isinstance(client, httpx.AsyncClient)
-
-
 # --- httpx backend exception mapping ---
 
 

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, NoReturn, Optional
+from typing import Optional
 
 import aiohttp
 from yarl import URL
@@ -191,19 +191,3 @@ async def close() -> None:
             await _session.close()
         _session = None
         _config = None
-
-
-def get_raw_client(timeout: float) -> NoReturn:
-    """aiohttp backend has no drop-in replacement for ``httpx.AsyncClient``.
-
-    ``aiohttp.ClientSession.get(url)`` returns an async context manager;
-    callers that expect ``await client.get(url)`` would break. Callers
-    should migrate to :func:`..fetch_bytes`. Set
-    ``DYN_MM_HTTP_BACKEND=httpx`` to opt back into the httpx call shape.
-    """
-    _ = timeout  # unused
-    raise NotImplementedError(
-        "The aiohttp backend does not expose a raw-client shim. "
-        "Use dynamo.common.multimodal.http.fetch_bytes(url, timeout) instead, "
-        "or set DYN_MM_HTTP_BACKEND=httpx to opt back into the httpx.AsyncClient shape."
-    )
