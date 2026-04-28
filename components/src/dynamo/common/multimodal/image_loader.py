@@ -24,7 +24,6 @@ from .http import (
     MmHttpTimeout,
     fetch_bytes,
 )
-from .http_client import get_http_semaphore
 from .url_validator import UrlValidationPolicy, validate_media_url
 
 logger = logging.getLogger(__name__)
@@ -102,13 +101,12 @@ class ImageLoader:
         """
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                async with get_http_semaphore():
-                    content = await fetch_bytes(
-                        image_url, self._http_timeout, policy=self._url_policy
-                    )
-                    if not content:
-                        raise ValueError("Empty response content from image URL")
-                    image_data = BytesIO(content)
+                content = await fetch_bytes(
+                    image_url, self._http_timeout, policy=self._url_policy
+                )
+                if not content:
+                    raise ValueError("Empty response content from image URL")
+                image_data = BytesIO(content)
 
             return await self._open_image(image_data)
 

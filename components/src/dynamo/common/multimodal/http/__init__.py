@@ -15,9 +15,7 @@ Callers use :func:`fetch_bytes` and catch the unified exception classes
 
 For SSRF-safe fetches (e.g. from ``ImageLoader``) pass a
 ``UrlValidationPolicy`` — :func:`fetch_bytes` then follows redirects
-manually and revalidates each hop against the policy, matching the
-behavior of the old httpx-only ``url_validator.fetch_with_revalidation``
-but backend-neutrally.
+manually and revalidates each hop against the policy.
 """
 
 from __future__ import annotations

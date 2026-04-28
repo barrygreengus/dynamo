@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import numpy as np
 import pytest
 
@@ -104,28 +103,27 @@ async def test_load_audio_rejects_http_by_default():
 
 
 @pytest.mark.asyncio
-async def test_load_audio_blocks_redirect_to_private_ip():
+async def test_load_audio_blocks_redirect_to_private_ip(monkeypatch):
     """A 302 to a blocked IP must be rejected per-hop, not only the initial URL."""
     loader = AudioLoader(url_policy=UrlValidationPolicy())
     loader._create_vllm_audio_io = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
 
-    redirect = MagicMock(spec=httpx.Response)
-    redirect.status_code = 302
-    redirect.is_redirect = True
-    redirect.headers = {"location": "https://169.254.169.254/evil"}
-    redirect.url = httpx.URL("https://8.8.8.8/a.wav")
-    redirect.aclose = AsyncMock()
+    # Force the httpx backend so we patch a single call site, then have its
+    # per-hop fetch return a redirect to a blocked IP. The facade's
+    # _fetch_with_revalidation must reject the redirect target before issuing
+    # a second hop.
+    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
+    from dynamo.common.multimodal.http import httpx_backend
 
-    client = MagicMock(spec=httpx.AsyncClient)
-    client.build_request = MagicMock(return_value=MagicMock(spec=httpx.Request))
-    client.send = AsyncMock(return_value=redirect)
+    fake_fetch_body_or_redirect = AsyncMock(
+        return_value=(None, "https://169.254.169.254/evil")
+    )
+    monkeypatch.setattr(
+        httpx_backend, "fetch_body_or_redirect", fake_fetch_body_or_redirect
+    )
 
-    with patch(
-        "dynamo.common.multimodal.audio_loader.get_http_client",
-        return_value=client,
-    ):
-        with pytest.raises(ValueError, match="blocked range"):
-            await loader.load_audio("https://8.8.8.8/a.wav")
+    with pytest.raises(ValueError, match="blocked range"):
+        await loader.load_audio("https://8.8.8.8/a.wav")
 
 
 @pytest.mark.asyncio

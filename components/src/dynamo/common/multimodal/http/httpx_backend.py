@@ -20,6 +20,10 @@ Operators can override any default at session-creation time via env vars:
     saturated pool surfaces quickly instead of waiting the read timeout.
   - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100)
   - ``DYN_MM_HTTP_MAX_KEEPALIVE`` (default: ``MAX_CONNECTIONS``)
+  - ``DYN_MM_HTTP_CONCURRENCY`` (default 50) — process-wide cap on
+    concurrent in-flight HTTP fetches. Acts as backpressure in front of
+    the httpx pool so a burst can't push ``PoolTimeout`` up the stack.
+    aiohttp has no equivalent because its connector queues natively.
 
 An operator who flips ``DYN_MM_HTTP_BACKEND=httpx`` gets a working backend,
 not the original PoolTimeout bug.
@@ -52,6 +56,7 @@ class _Config:
         "read_timeout_override",
         "write_timeout",
         "pool_timeout",
+        "concurrency",
     )
 
     def __init__(self) -> None:
@@ -66,11 +71,13 @@ class _Config:
         self.read_timeout_override = raw_read if raw_read >= 0 else None
         self.write_timeout = _env_float("DYN_MM_HTTP_WRITE_TIMEOUT", 10.0)
         self.pool_timeout = _env_float("DYN_MM_HTTP_POOL_TIMEOUT", 60.0)
+        self.concurrency = _env_int("DYN_MM_HTTP_CONCURRENCY", 50)
 
 
 _config: Optional[_Config] = None
 _client: Optional[httpx.AsyncClient] = None
 _client_lock = asyncio.Lock()
+_semaphore: Optional[asyncio.Semaphore] = None
 
 
 def _get_config() -> _Config:
@@ -78,6 +85,18 @@ def _get_config() -> _Config:
     if _config is None:
         _config = _Config()
     return _config
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide concurrency cap on in-flight httpx fetches.
+
+    Lazy-init so the bound (``DYN_MM_HTTP_CONCURRENCY``) is read once and
+    the ``asyncio.Semaphore`` binds to whichever loop first awaits it.
+    """
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_get_config().concurrency)
+    return _semaphore
 
 
 def _per_call_timeout(read_timeout: float) -> httpx.Timeout:
@@ -130,18 +149,21 @@ async def _get_client() -> httpx.AsyncClient:
 
 async def fetch_bytes(url: str, timeout: float) -> bytes:
     client = await _get_client()
-    try:
-        response = await client.get(url, timeout=_per_call_timeout(timeout))
-        response.raise_for_status()
-        return response.content
-    except httpx.HTTPStatusError as e:
-        raise MmHttpStatusError(e.response.status_code, str(e), url) from e
-    except httpx.TimeoutException as e:
-        raise MmHttpTimeout(f"Timeout loading {url}") from e
-    except (httpx.ConnectError, httpx.NetworkError) as e:
-        raise MmHttpConnectionError(f"Connection error loading {url}: {e}") from e
-    except httpx.HTTPError as e:
-        raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
+    async with _get_semaphore():
+        try:
+            response = await client.get(url, timeout=_per_call_timeout(timeout))
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPStatusError as e:
+            raise MmHttpStatusError(e.response.status_code, str(e), url) from e
+        except httpx.TimeoutException as e:
+            raise MmHttpTimeout(f"Timeout loading {url}") from e
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            raise MmHttpConnectionError(
+                f"Connection error loading {url}: {e}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
 
 async def fetch_body_or_redirect(
@@ -156,40 +178,44 @@ async def fetch_body_or_redirect(
     connection classes on transport failure.
     """
     client = await _get_client()
-    try:
-        request = client.build_request("GET", url)
-        response = await client.send(
-            request, follow_redirects=False, timeout=_per_call_timeout(timeout)
-        )
-    except httpx.TimeoutException as e:
-        raise MmHttpTimeout(f"Timeout loading {url}") from e
-    except (httpx.ConnectError, httpx.NetworkError) as e:
-        raise MmHttpConnectionError(f"Connection error loading {url}: {e}") from e
-    except httpx.HTTPError as e:
-        raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
-
-    try:
-        if response.is_redirect:
-            location = response.headers.get("location")
-            if location:
-                next_url = str(response.url.join(location))
-                return None, next_url
-            # 3xx without Location: treat as terminal, surface the body.
-            return response.content, None
+    async with _get_semaphore():
+        try:
+            request = client.build_request("GET", url)
+            response = await client.send(
+                request, follow_redirects=False, timeout=_per_call_timeout(timeout)
+            )
+        except httpx.TimeoutException as e:
+            raise MmHttpTimeout(f"Timeout loading {url}") from e
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            raise MmHttpConnectionError(
+                f"Connection error loading {url}: {e}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
         try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise MmHttpStatusError(e.response.status_code, str(e), url) from e
-        return response.content, None
-    finally:
-        await response.aclose()
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if location:
+                    next_url = str(response.url.join(location))
+                    return None, next_url
+                # 3xx without Location: treat as terminal, surface the body.
+                return response.content, None
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise MmHttpStatusError(e.response.status_code, str(e), url) from e
+            return response.content, None
+        finally:
+            await response.aclose()
 
 
 async def close() -> None:
-    global _client, _config
+    global _client, _config, _semaphore
     async with _client_lock:
         if _client is not None and not _client.is_closed:
             await _client.aclose()
         _client = None
         _config = None
+        _semaphore = None
