@@ -6,9 +6,38 @@
 Both backends import :class:`HttpArgs` and call :func:`from_env`; each
 consumes the fields that apply to it. Overlapping knobs
 (``MAX_CONNECTIONS``, ``READ_TIMEOUT``) live as one field so they don't
-get parsed twice with drift-prone defaults. Fields are grouped by
-which backend consumes them — see the section comments inside
-:class:`HttpArgs`.
+get parsed twice with drift-prone defaults.
+
+Operator-tunable env vars
+-------------------------
+
+Shared (consumed by both backends):
+
+  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100) — total pool size cap.
+  - ``DYN_MM_HTTP_READ_TIMEOUT`` (unset by default) — when set, replaces
+    the caller's per-call ``timeout`` arg on every fetch. Useful as a
+    global ceiling without editing call sites.
+
+httpx-only:
+
+  - ``DYN_MM_HTTP_MAX_KEEPALIVE`` (default = ``MAX_CONNECTIONS``) — cap
+    on idle keepalive connections kept warm.
+  - ``DYN_MM_HTTP_CONNECT_TIMEOUT`` (default 5.0s) — TCP-connect budget.
+  - ``DYN_MM_HTTP_POOL_TIMEOUT`` (default 60.0s) — wait-for-free-slot
+    budget. Decoupled from read so a saturated pool surfaces fast.
+  - ``DYN_MM_HTTP_CONCURRENCY`` (default 50) — process-wide cap on
+    concurrent in-flight HTTP fetches. Acts as backpressure in front
+    of the httpx pool so a burst can't push ``PoolTimeout`` up the
+    stack. aiohttp has no equivalent because its connector queues
+    natively.
+
+aiohttp-only:
+
+  - ``DYN_MM_HTTP_KEEPALIVE_TIMEOUT`` (default 15.0s) — how long an
+    idle connection stays warm in the pool.
+
+Fields on :class:`HttpArgs` are grouped by which backend consumes them
+— see the section comments inside the class.
 """
 
 from __future__ import annotations

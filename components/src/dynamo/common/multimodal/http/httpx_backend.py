@@ -3,27 +3,17 @@
 
 """httpx backend for the multimodal HTTP facade.
 
-Defaults:
-  - ``httpx.Timeout(connect=5, read=<per-call>, write=None, pool=60)``
-    applied per-request, so each fetch sees its caller-supplied read
-    timeout instead of the first caller's value getting baked into the
-    singleton. ``write`` is unbounded — fan-out GET workloads have no
-    meaningful write phase.
-  - ``httpx.Limits(max_connections=100, max_keepalive_connections=100)`` —
-    keepalive matches pool size so idle connections get reused under
-    fan-out instead of churning TLS handshakes.
+Behavior notes (operator-tunable knobs live in :mod:`.args`):
 
-Tunable via ``DYN_MM_HTTP_*`` env vars; see ``args.py`` for the full
-list and defaults. Knobs this backend consumes:
-
-  - ``DYN_MM_HTTP_CONNECT_TIMEOUT``
-  - ``DYN_MM_HTTP_READ_TIMEOUT`` (overrides the caller's per-call arg)
-  - ``DYN_MM_HTTP_POOL_TIMEOUT``
-  - ``DYN_MM_HTTP_MAX_CONNECTIONS``
-  - ``DYN_MM_HTTP_MAX_KEEPALIVE``
-  - ``DYN_MM_HTTP_CONCURRENCY`` — process-wide cap on concurrent
-    in-flight HTTP fetches. Acts as backpressure in front of the httpx
-    pool so a burst can't push ``PoolTimeout`` up the stack. aiohttp
+  - ``httpx.Timeout`` is built per-request so each fetch sees its
+    caller-supplied read timeout instead of the first caller's value
+    getting baked into the singleton. ``write`` is unbounded — fan-out
+    GET workloads have no meaningful write phase.
+  - ``max_keepalive_connections`` is sized to match ``max_connections``
+    so idle connections get reused under fan-out instead of churning
+    TLS handshakes.
+  - A process-wide semaphore (``DYN_MM_HTTP_CONCURRENCY``) wraps every
+    fetch so a burst can't push ``PoolTimeout`` up the stack. aiohttp
     has no equivalent because its connector queues natively.
 
 An operator who flips ``DYN_MM_HTTP_BACKEND=httpx`` gets a working backend,

@@ -4,26 +4,20 @@
 """aiohttp backend for the multimodal HTTP facade.
 
 Singleton ``aiohttp.ClientSession`` mirroring vLLM's
-``HTTPConnection.get_async_client`` pattern, with an explicit ``TCPConnector``
-so single-origin fan-out has all 100 pool slots available.
+``HTTPConnection.get_async_client`` pattern, with an explicit
+``TCPConnector`` so single-origin fan-out has all pool slots available.
 
-Defaults:
-  - ``limit=100`` — total pool (matches old httpx cap).
-  - ``limit_per_host=0`` — unlimited per host, load-bearing for single-origin.
-  - ``keepalive_timeout=15`` — ride through request bursts.
-  - ``enable_cleanup_closed=True`` — purge half-closed TLS sockets.
-  - ``trust_env=False`` — matches today's behavior; flip in a follow-up PR
-    after a proxy-impact review.
+Behavior notes (operator-tunable knobs live in :mod:`.args`):
 
-Tunable via ``DYN_MM_HTTP_*`` env vars; see ``args.py`` for the full
-list and defaults. Knobs this backend consumes:
-
-  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` — connector ``limit``.
-  - ``DYN_MM_HTTP_KEEPALIVE_TIMEOUT``.
-  - ``DYN_MM_HTTP_READ_TIMEOUT`` (overrides the caller's per-call arg).
-
-Per-request timeout is a ``ClientTimeout(total=timeout)`` — covers pool
-wait + connect + read + body in one budget, same shape as vLLM.
+  - ``limit_per_host=0`` is hard-coded — unlimited per host, load-bearing
+    for single-origin fan-out, not something an operator should be able
+    to silently shrink.
+  - ``enable_cleanup_closed=True`` purges half-closed TLS sockets.
+  - ``trust_env=False`` matches today's behavior; flip in a follow-up
+    PR after a proxy-impact review.
+  - Per-request timeout is a ``ClientTimeout(total=timeout)`` — covers
+    pool wait + connect + read + body in one budget, same shape as
+    vLLM.
 """
 
 from __future__ import annotations
