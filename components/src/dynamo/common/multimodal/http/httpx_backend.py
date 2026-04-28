@@ -3,27 +3,28 @@
 
 """httpx backend for the multimodal HTTP facade.
 
-Defaults (not as-shipped):
-  - ``httpx.Timeout(connect=5, read=<per-call>, write=10, pool=60)`` applied
-    per-request, so each fetch sees its caller-supplied read timeout instead
-    of the first caller's value getting baked into the singleton.
+Defaults:
+  - ``httpx.Timeout(connect=5, read=<per-call>, write=None, pool=60)``
+    applied per-request, so each fetch sees its caller-supplied read
+    timeout instead of the first caller's value getting baked into the
+    singleton. ``write`` is unbounded — fan-out GET workloads have no
+    meaningful write phase.
   - ``httpx.Limits(max_connections=100, max_keepalive_connections=100)`` —
-    keepalive matches pool size so idle connections get reused under fan-out
-    instead of churning TLS handshakes.
+    keepalive matches pool size so idle connections get reused under
+    fan-out instead of churning TLS handshakes.
 
-Operators can override any default at session-creation time via env vars:
+Tunable via ``DYN_MM_HTTP_*`` env vars; see ``args.py`` for the full
+list and defaults. Knobs this backend consumes:
 
-  - ``DYN_MM_HTTP_CONNECT_TIMEOUT`` (default 5s)
-  - ``DYN_MM_HTTP_READ_TIMEOUT`` (default: caller's per-call ``timeout`` arg)
-  - ``DYN_MM_HTTP_WRITE_TIMEOUT`` (default 10s)
-  - ``DYN_MM_HTTP_POOL_TIMEOUT`` (default 60s) — decoupled from read so a
-    saturated pool surfaces quickly instead of waiting the read timeout.
-  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100)
-  - ``DYN_MM_HTTP_MAX_KEEPALIVE`` (default: ``MAX_CONNECTIONS``)
-  - ``DYN_MM_HTTP_CONCURRENCY`` (default 50) — process-wide cap on
-    concurrent in-flight HTTP fetches. Acts as backpressure in front of
-    the httpx pool so a burst can't push ``PoolTimeout`` up the stack.
-    aiohttp has no equivalent because its connector queues natively.
+  - ``DYN_MM_HTTP_CONNECT_TIMEOUT``
+  - ``DYN_MM_HTTP_READ_TIMEOUT`` (overrides the caller's per-call arg)
+  - ``DYN_MM_HTTP_POOL_TIMEOUT``
+  - ``DYN_MM_HTTP_MAX_CONNECTIONS``
+  - ``DYN_MM_HTTP_MAX_KEEPALIVE``
+  - ``DYN_MM_HTTP_CONCURRENCY`` — process-wide cap on concurrent
+    in-flight HTTP fetches. Acts as backpressure in front of the httpx
+    pool so a burst can't push ``PoolTimeout`` up the stack. aiohttp
+    has no equivalent because its connector queues natively.
 
 An operator who flips ``DYN_MM_HTTP_BACKEND=httpx`` gets a working backend,
 not the original PoolTimeout bug.
@@ -37,54 +38,23 @@ from typing import Optional
 
 import httpx
 
-from . import (
-    MmHttpConnectionError,
-    MmHttpStatusError,
-    MmHttpTimeout,
-    _env_float,
-    _env_int,
-)
+from . import MmHttpConnectionError, MmHttpStatusError, MmHttpTimeout
+from .args import HttpArgs, from_env
 
 logger = logging.getLogger(__name__)
 
 
-class _Config:
-    __slots__ = (
-        "max_connections",
-        "max_keepalive",
-        "connect_timeout",
-        "read_timeout_override",
-        "write_timeout",
-        "pool_timeout",
-        "concurrency",
-    )
-
-    def __init__(self) -> None:
-        self.max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 100)
-        self.max_keepalive = _env_int(
-            "DYN_MM_HTTP_MAX_KEEPALIVE", self.max_connections
-        )
-        self.connect_timeout = _env_float("DYN_MM_HTTP_CONNECT_TIMEOUT", 5.0)
-        # ``read_timeout_override`` is None unless the env var is set; when None
-        # the caller's per-call ``timeout`` arg is used as the read budget.
-        raw_read = _env_float("DYN_MM_HTTP_READ_TIMEOUT", -1.0)
-        self.read_timeout_override = raw_read if raw_read >= 0 else None
-        self.write_timeout = _env_float("DYN_MM_HTTP_WRITE_TIMEOUT", 10.0)
-        self.pool_timeout = _env_float("DYN_MM_HTTP_POOL_TIMEOUT", 60.0)
-        self.concurrency = _env_int("DYN_MM_HTTP_CONCURRENCY", 50)
-
-
-_config: Optional[_Config] = None
+_args: Optional[HttpArgs] = None
 _client: Optional[httpx.AsyncClient] = None
 _client_lock = asyncio.Lock()
 _semaphore: Optional[asyncio.Semaphore] = None
 
 
-def _get_config() -> _Config:
-    global _config
-    if _config is None:
-        _config = _Config()
-    return _config
+def _get_args() -> HttpArgs:
+    global _args
+    if _args is None:
+        _args = from_env()
+    return _args
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -95,33 +65,33 @@ def _get_semaphore() -> asyncio.Semaphore:
     """
     global _semaphore
     if _semaphore is None:
-        _semaphore = asyncio.Semaphore(_get_config().concurrency)
+        _semaphore = asyncio.Semaphore(_get_args().concurrency)
     return _semaphore
 
 
 def _per_call_timeout(read_timeout: float) -> httpx.Timeout:
-    cfg = _get_config()
+    args = _get_args()
     effective_read = (
-        cfg.read_timeout_override
-        if cfg.read_timeout_override is not None
+        args.read_timeout_override
+        if args.read_timeout_override is not None
         else read_timeout
     )
     return httpx.Timeout(
-        connect=cfg.connect_timeout,
+        connect=args.connect_timeout,
         read=effective_read,
-        write=cfg.write_timeout,
-        pool=cfg.pool_timeout,
+        write=None,
+        pool=args.pool_timeout,
     )
 
 
 def _build_client() -> httpx.AsyncClient:
-    cfg = _get_config()
+    args = _get_args()
     return httpx.AsyncClient(
         timeout=_per_call_timeout(60.0),
         follow_redirects=True,
         limits=httpx.Limits(
-            max_connections=cfg.max_connections,
-            max_keepalive_connections=cfg.max_keepalive,
+            max_connections=args.max_connections,
+            max_keepalive_connections=args.max_keepalive,
         ),
     )
 
@@ -131,17 +101,16 @@ async def _get_client() -> httpx.AsyncClient:
     async with _client_lock:
         if _client is None or _client.is_closed:
             _client = _build_client()
-            cfg = _get_config()
+            args = _get_args()
             logger.info(
                 "httpx backend initialized: max_connections=%d, max_keepalive=%d, "
-                "timeout(connect=%.1fs, write=%.1fs, pool=%.1fs); read timeout %s",
-                cfg.max_connections,
-                cfg.max_keepalive,
-                cfg.connect_timeout,
-                cfg.write_timeout,
-                cfg.pool_timeout,
-                f"forced to {cfg.read_timeout_override:.1f}s via env"
-                if cfg.read_timeout_override is not None
+                "timeout(connect=%.1fs, write=None, pool=%.1fs); read timeout %s",
+                args.max_connections,
+                args.max_keepalive,
+                args.connect_timeout,
+                args.pool_timeout,
+                f"forced to {args.read_timeout_override:.1f}s via env"
+                if args.read_timeout_override is not None
                 else "set per-request",
             )
     return _client
@@ -212,10 +181,10 @@ async def fetch_body_or_redirect(
 
 
 async def close() -> None:
-    global _client, _config, _semaphore
+    global _client, _args, _semaphore
     async with _client_lock:
         if _client is not None and not _client.is_closed:
             await _client.aclose()
         _client = None
-        _config = None
+        _args = None
         _semaphore = None

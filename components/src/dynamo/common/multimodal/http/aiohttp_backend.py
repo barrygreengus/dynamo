@@ -15,13 +15,12 @@ Defaults:
   - ``trust_env=False`` — matches today's behavior; flip in a follow-up PR
     after a proxy-impact review.
 
-Operators can override at session-creation time via env vars:
+Tunable via ``DYN_MM_HTTP_*`` env vars; see ``args.py`` for the full
+list and defaults. Knobs this backend consumes:
 
-  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100) — connector ``limit``.
-  - ``DYN_MM_HTTP_LIMIT_PER_HOST`` (default 0).
-  - ``DYN_MM_HTTP_KEEPALIVE_TIMEOUT`` (default 15s).
-  - ``DYN_MM_HTTP_READ_TIMEOUT`` — when set, replaces the caller-supplied
-    per-request timeout; otherwise the caller's ``timeout`` arg is used.
+  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` — connector ``limit``.
+  - ``DYN_MM_HTTP_KEEPALIVE_TIMEOUT``.
+  - ``DYN_MM_HTTP_READ_TIMEOUT`` (overrides the caller's per-call arg).
 
 Per-request timeout is a ``ClientTimeout(total=timeout)`` — covers pool
 wait + connect + read + body in one budget, same shape as vLLM.
@@ -36,63 +35,42 @@ from typing import Optional
 import aiohttp
 from yarl import URL
 
-from . import (
-    MmHttpConnectionError,
-    MmHttpStatusError,
-    MmHttpTimeout,
-    _env_float,
-    _env_int,
-)
+from . import MmHttpConnectionError, MmHttpStatusError, MmHttpTimeout
+from .args import HttpArgs, from_env
 
 logger = logging.getLogger(__name__)
 
 
-class _Config:
-    __slots__ = (
-        "limit",
-        "limit_per_host",
-        "keepalive_timeout",
-        "read_timeout_override",
-    )
-
-    def __init__(self) -> None:
-        self.limit = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 100)
-        self.limit_per_host = _env_int("DYN_MM_HTTP_LIMIT_PER_HOST", 0)
-        self.keepalive_timeout = _env_float("DYN_MM_HTTP_KEEPALIVE_TIMEOUT", 15.0)
-        # ``read_timeout_override`` is None unless the env var is set; when None
-        # the caller's per-call ``timeout`` arg is used as the total budget.
-        raw_read = _env_float("DYN_MM_HTTP_READ_TIMEOUT", -1.0)
-        self.read_timeout_override = raw_read if raw_read >= 0 else None
-
-
-_config: Optional[_Config] = None
+_args: Optional[HttpArgs] = None
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
 
 
-def _get_config() -> _Config:
-    global _config
-    if _config is None:
-        _config = _Config()
-    return _config
+def _get_args() -> HttpArgs:
+    global _args
+    if _args is None:
+        _args = from_env()
+    return _args
 
 
 def _effective_timeout(timeout: float) -> aiohttp.ClientTimeout:
-    cfg = _get_config()
+    args = _get_args()
     total = (
-        cfg.read_timeout_override
-        if cfg.read_timeout_override is not None
+        args.read_timeout_override
+        if args.read_timeout_override is not None
         else timeout
     )
     return aiohttp.ClientTimeout(total=total)
 
 
 def _build_session() -> aiohttp.ClientSession:
-    cfg = _get_config()
+    args = _get_args()
     connector = aiohttp.TCPConnector(
-        limit=cfg.limit,
-        limit_per_host=cfg.limit_per_host,
-        keepalive_timeout=cfg.keepalive_timeout,
+        limit=args.max_connections,
+        # Single-origin fan-out is the whole point; capping per-host
+        # would defeat it. Hard-coded rather than env-tunable.
+        limit_per_host=0,
+        keepalive_timeout=args.keepalive_timeout,
         enable_cleanup_closed=True,
     )
     return aiohttp.ClientSession(connector=connector, trust_env=False)
@@ -103,15 +81,14 @@ async def _get_session() -> aiohttp.ClientSession:
     async with _session_lock:
         if _session is None or _session.closed:
             _session = _build_session()
-            cfg = _get_config()
+            args = _get_args()
             logger.info(
-                "aiohttp backend initialized: limit=%d, limit_per_host=%d, "
+                "aiohttp backend initialized: limit=%d, limit_per_host=0, "
                 "keepalive_timeout=%.1fs%s",
-                cfg.limit,
-                cfg.limit_per_host,
-                cfg.keepalive_timeout,
-                f", read timeout forced to {cfg.read_timeout_override:.1f}s via env"
-                if cfg.read_timeout_override is not None
+                args.max_connections,
+                args.keepalive_timeout,
+                f", read timeout forced to {args.read_timeout_override:.1f}s via env"
+                if args.read_timeout_override is not None
                 else "; total timeout set per-request",
             )
     return _session
@@ -185,9 +162,9 @@ async def fetch_body_or_redirect(
 
 
 async def close() -> None:
-    global _session, _config
+    global _session, _args
     async with _session_lock:
         if _session is not None and not _session.closed:
             await _session.close()
         _session = None
-        _config = None
+        _args = None
