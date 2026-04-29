@@ -115,7 +115,7 @@ class HttpArgs:
 
 def from_env() -> HttpArgs:
     """Build an :class:`HttpArgs` from the current environment."""
-    max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 200)
+    max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 100)
     raw_read = _env_float("DYN_MM_HTTP_READ_TIMEOUT", -1.0)
     return HttpArgs(
         # shared
