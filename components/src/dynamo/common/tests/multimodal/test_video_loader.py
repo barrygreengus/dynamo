@@ -19,10 +19,10 @@ pytestmark = [
 
 @pytest.mark.asyncio
 async def test_load_video_rejects_http_by_default():
-    """Wiring smoke test: VideoLoader plumbs ``url_policy`` to the validator.
+    """Wiring smoke: VideoLoader plumbs ``url_policy`` to the validator.
 
-    All other URL-validation behavior is covered in ``test_url_validator.py``;
-    per-hop SSRF revalidation is covered in ``test_http_backends.py``.
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
     """
     loader = VideoLoader(url_policy=UrlValidationPolicy())
 

@@ -31,10 +31,10 @@ def _permissive_http_policy() -> UrlValidationPolicy:
 
 @pytest.mark.asyncio
 async def test_load_audio_rejects_http_by_default():
-    """Wiring smoke test: AudioLoader plumbs ``url_policy`` to the validator.
+    """Wiring smoke: AudioLoader plumbs ``url_policy`` to the validator.
 
-    All other URL-validation behavior is covered in ``test_url_validator.py``;
-    per-hop SSRF revalidation is covered in ``test_http_backends.py``.
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
     """
     loader = AudioLoader(url_policy=UrlValidationPolicy())
 

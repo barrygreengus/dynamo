@@ -165,22 +165,17 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-async def test_file_url_is_rejected(loader: ImageLoader) -> None:
-    """file:// inputs should be rejected before any local file read is attempted."""
-    with pytest.raises(ValueError, match="Invalid image source scheme"):
-        await loader.load_image("file:///nonexistent/path/img.png")
+async def test_http_rejected_by_default() -> None:
+    """Wiring smoke: ImageLoader plumbs ``url_policy`` to the validator.
 
-
-@pytest.mark.parametrize("url_factory", [lambda p: p.as_uri(), lambda p: str(p)])
-async def test_local_file_inputs_are_rejected(
-    loader: ImageLoader, tmp_path, url_factory
-) -> None:
-    """Local filesystem image inputs must be rejected for both file:// and bare paths."""
-    image_path = tmp_path / "secret.png"
-    Image.new("RGB", (1, 1), color="red").save(image_path, format="PNG")
-
-    with pytest.raises(ValueError, match="Invalid image source scheme"):
-        await loader.load_image(url_factory(image_path))
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
+    """
+    strict_loader = ImageLoader(
+        cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
+    )
+    with pytest.raises(ValueError, match="scheme|not allowed"):
+        await strict_loader.load_image("http://example.com/x.png")
 
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
@@ -193,25 +188,6 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
     """data: URL with non-image media type should raise ValueError."""
     with pytest.raises(ValueError, match="Data URL must be an image type"):
         await loader.load_image("data:text/plain;base64,aGVsbG8=")
-
-
-# --- SSRF / scheme rejection ---
-
-
-async def test_http_scheme_rejected_by_default(monkeypatch) -> None:
-    """With default env policy, http:// URLs must be rejected before any fetch."""
-    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
-    monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
-
-    default_loader = ImageLoader(cache_size=4, http_timeout=30.0)
-
-    mock_fetch = _mock_fetch_bytes()
-    with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(ValueError, match="scheme|not allowed"):
-            await default_loader.load_image("http://example.com/x.png")
-
-    # Fetch must not be reached when the URL is rejected.
-    assert mock_fetch.call_count == 0
 
 
 # --- HTTP error contract ---
