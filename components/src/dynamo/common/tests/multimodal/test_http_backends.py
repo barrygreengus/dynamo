@@ -1,18 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backend-resolution and exception-mapping tests for the multimodal HTTP facade."""
+"""Facade-level tests: backend resolution + SSRF revalidation loop.
+
+Per-backend exception mapping lives in
+``test_aiohttp_backend.py`` / ``test_httpx_backend.py``.
+"""
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import aiohttp
-import httpx
 import pytest
 
 from dynamo.common.multimodal import http as mm_http
+from dynamo.common.multimodal.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -24,7 +29,12 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def _reset_backend_cache():
-    """Every test resolves the backend from scratch."""
+    """Every test resolves the backend from scratch.
+
+    The reset before ``yield`` ensures each test starts with no cached backend;
+    the reset after ``yield`` prevents this module-level state from leaking
+    into other tests or fixtures that run later in the session.
+    """
     mm_http._impl = None
     yield
     mm_http._impl = None
@@ -36,12 +46,14 @@ def _reset_backend_cache():
 async def test_default_backend_is_aiohttp(monkeypatch) -> None:
     monkeypatch.delenv("DYN_MM_HTTP_BACKEND", raising=False)
     from dynamo.common.multimodal.http import aiohttp_backend
+
     assert mm_http._resolve_backend() is aiohttp_backend
 
 
 async def test_httpx_backend_selected(monkeypatch) -> None:
     monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
     from dynamo.common.multimodal.http import httpx_backend
+
     assert mm_http._resolve_backend() is httpx_backend
 
 
@@ -49,100 +61,6 @@ async def test_invalid_backend_raises(monkeypatch) -> None:
     monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "requests")
     with pytest.raises(ValueError, match="DYN_MM_HTTP_BACKEND"):
         mm_http._resolve_backend()
-
-
-# --- httpx backend exception mapping ---
-
-
-async def test_httpx_timeout_mapped(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
-    from dynamo.common.multimodal.http import httpx_backend
-
-    async def _raise_timeout(url, **kwargs):
-        raise httpx.ConnectTimeout("timeout")
-
-    mock_client = MagicMock(spec=httpx.AsyncClient)
-    mock_client.is_closed = False
-    mock_client.get = MagicMock(side_effect=_raise_timeout)
-    with patch.object(httpx_backend, "_client", mock_client):
-        with pytest.raises(mm_http.MmHttpTimeout) as exc:
-            await httpx_backend.fetch_bytes("https://x", 30.0)
-        assert isinstance(exc.value.__cause__, httpx.ConnectTimeout)
-
-
-async def test_httpx_status_mapped(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
-    from dynamo.common.multimodal.http import httpx_backend
-
-    response = MagicMock(spec=httpx.Response)
-    response.status_code = 404
-    response.raise_for_status.side_effect = httpx.HTTPStatusError(
-        "404 Not Found", request=MagicMock(), response=response
-    )
-
-    async def _return_response(url, **kwargs):
-        return response
-
-    mock_client = MagicMock(spec=httpx.AsyncClient)
-    mock_client.is_closed = False
-    mock_client.get = MagicMock(side_effect=_return_response)
-    with patch.object(httpx_backend, "_client", mock_client):
-        with pytest.raises(mm_http.MmHttpStatusError) as exc:
-            await httpx_backend.fetch_bytes("https://x", 30.0)
-        assert exc.value.status == 404
-
-
-# --- aiohttp backend exception mapping ---
-# aiohttp's session.get(...) returns an async context manager, so the mock
-# must return an object with __aenter__ / __aexit__, not a coroutine that
-# raises. We construct a fake CM whose __aenter__ raises the target exception.
-
-
-def _cm_raising(exc_factory):
-    """Return a session.get() stand-in: a factory that yields an async CM
-    whose ``__aenter__`` raises what ``exc_factory()`` returns."""
-
-    class _RaisingCM:
-        async def __aenter__(self):
-            raise exc_factory()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    def _get(url, **kwargs):
-        return _RaisingCM()
-
-    return _get
-
-
-async def test_aiohttp_timeout_mapped(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "aiohttp")
-    from dynamo.common.multimodal.http import aiohttp_backend
-
-    session = MagicMock(spec=aiohttp.ClientSession)
-    session.closed = False
-    session.get = _cm_raising(lambda: asyncio.TimeoutError())
-    with patch.object(aiohttp_backend, "_session", session):
-        with pytest.raises(mm_http.MmHttpTimeout):
-            await aiohttp_backend.fetch_bytes("https://x", 30.0)
-
-
-async def test_aiohttp_status_mapped(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "aiohttp")
-    from dynamo.common.multimodal.http import aiohttp_backend
-
-    def _mk_error():
-        return aiohttp.ClientResponseError(
-            request_info=MagicMock(), history=(), status=404, message="Not Found"
-        )
-
-    session = MagicMock(spec=aiohttp.ClientSession)
-    session.closed = False
-    session.get = _cm_raising(_mk_error)
-    with patch.object(aiohttp_backend, "_session", session):
-        with pytest.raises(mm_http.MmHttpStatusError) as exc:
-            await aiohttp_backend.fetch_bytes("https://x", 30.0)
-        assert exc.value.status == 404
 
 
 # --- Backend-neutral SSRF revalidation via fetch_bytes(policy=...) ---
@@ -154,16 +72,12 @@ async def test_aiohttp_status_mapped(monkeypatch) -> None:
 # backend. We then parametrize over both backends to confirm routing.
 
 
-from dynamo.common.multimodal.url_validator import (  # noqa: E402
-    UrlValidationError,
-    UrlValidationPolicy,
-)
-
 _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
 
 
 def _backend_mod(name: str):
     from dynamo.common.multimodal.http import aiohttp_backend, httpx_backend
+
     return {"aiohttp": aiohttp_backend, "httpx": httpx_backend}[name]
 
 
@@ -248,6 +162,4 @@ async def test_fetch_with_policy_enforces_redirect_limit(
 
     with patch.object(backend, "fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError, match="Too many redirects"):
-            await mm_http.fetch_bytes(
-                "https://example.com/a", 30.0, policy=_PERMISSIVE
-            )
+            await mm_http.fetch_bytes("https://example.com/a", 30.0, policy=_PERMISSIVE)
