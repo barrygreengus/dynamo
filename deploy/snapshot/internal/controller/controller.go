@@ -46,6 +46,8 @@ type NodeController struct {
 	stopCh chan struct{}
 }
 
+const gmsCompletionPollInterval = 50 * time.Millisecond
+
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
 	cfg *types.AgentConfig,
@@ -355,7 +357,7 @@ func (w *NodeController) maybeStartRestoreForContainer(
 //  2. Resolve the container ID and host PID
 //  3. Call executor.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
 //  4. Write a snapshot-complete sentinel into the pod's snapshot-control
-//     volume on success (observed by the workload via inotify), or SIGKILL
+//     volume on success (observed by the workload via polling), or SIGKILL
 //     on failure (unrecoverable CUDA-locked process)
 //  5. Mark job as completed or failed
 func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, containerName, checkpointLocation, podKey string, startedAt time.Time) error {
@@ -469,7 +471,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	if gmsDir := strings.TrimSpace(pod.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation]); gmsDir != "" {
 		sentinel := filepath.Join(gmsDir, gmsCompletionFileName(pod, snapshotprotocol.GMSSaveCompleteFile))
 		log.Info("Waiting for GMS checkpoint saver", "sentinel", sentinel)
-		if err := waitForFile(leaseCtx, sentinel, time.Second); err != nil {
+		if err := waitForFile(leaseCtx, sentinel, gmsCompletionPollInterval); err != nil {
 			log.Error(err, "GMS checkpoint saver did not complete")
 			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
 			if signalErr := snapshotruntime.SendSignalToPID(log, containerPID, syscall.SIGKILL, "gms checkpoint save failed"); signalErr != nil {
@@ -508,7 +510,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 //  1. Mark the current container instance as in_progress
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
 //  3. Write a restore-complete sentinel into the pod's snapshot-control
-//     volume to wake the workload (observed via inotify)
+//     volume to wake the workload (observed via polling)
 //  4. Mark the container instance as completed
 //
 // Kubernetes readiness is gated separately: each restore-target container's
@@ -580,7 +582,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	if gmsDir := strings.TrimSpace(pod.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation]); gmsDir != "" {
 		sentinel := filepath.Join(gmsDir, gmsCompletionFileName(pod, snapshotprotocol.GMSLoadCompleteFile))
 		log.Info("Waiting for GMS checkpoint loader", "sentinel", sentinel)
-		if err := waitForFile(restoreCtx, sentinel, time.Second); err != nil {
+		if err := waitForFile(restoreCtx, sentinel, gmsCompletionPollInterval); err != nil {
 			log.Error(err, "GMS checkpoint loader did not complete")
 			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
