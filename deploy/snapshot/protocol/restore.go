@@ -105,10 +105,11 @@ func PrepareRestorePodSpec(
 //
 //   - **Synthesis from existing probe (preferred).** If the container already
 //     defines a StartupProbe, LivenessProbe, or ReadinessProbe (in that order
-//     of preference), we deep-copy it and set FailureThreshold=MaxInt32 +
-//     SuccessThreshold=1. The kubelet then runs the workload's *own* probe
+//     of preference), we deep-copy it and set the retry thresholds plus the
+//     minimum probe cadence. The kubelet then runs the workload's *own* probe
 //     with effectively-infinite retries during restore — the same shape the
-//     non-failover restore path on main has used since #8403.
+//     non-failover restore path on main has used since #8403, but without the
+//     cold-start probe interval.
 //
 //   - **Sentinel-file fallback.** If the container has no Startup/Liveness/
 //     Readiness probes at all, kubelet would otherwise mark the `sleep
@@ -139,6 +140,7 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 					Command: restoreStartupProbeCommand(),
 				},
 			},
+			TimeoutSeconds:   1,
 			PeriodSeconds:    1,
 			FailureThreshold: math.MaxInt32,
 			SuccessThreshold: 1,
@@ -147,6 +149,9 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 	}
 
 	startup = startup.DeepCopy()
+	startup.InitialDelaySeconds = 0
+	startup.PeriodSeconds = 1
+	startup.TimeoutSeconds = 1
 	startup.FailureThreshold = math.MaxInt32
 	startup.SuccessThreshold = 1
 	container.StartupProbe = startup
