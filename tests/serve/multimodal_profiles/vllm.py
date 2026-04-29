@@ -47,6 +47,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_image_payload(["green"])],
     ),
     MultimodalModelProfile(
+        name="Qwen/Qwen3.5-0.8B",
+        short_name="qwen3.5-0.8b",
+        topologies={
+            "agg": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=600,
+                profiled_vram_gib=4.0,
+            ),
+        },
+        request_payloads=[make_image_payload(["green"])],
+    ),
+    MultimodalModelProfile(
         name="Qwen/Qwen3-VL-2B-Instruct",
         short_name="qwen3-vl-2b-video",
         topologies={

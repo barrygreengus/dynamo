@@ -789,6 +789,65 @@ def test_multimodal_b64_frontend_decoding(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.pre_merge
+@pytest.mark.model("Qwen/Qwen3.5-0.8B")
+@pytest.mark.timeout(600)
+def test_multimodal_b64_qwen3_5_0_8b(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """
+    Base64 inline image variant for Qwen3.5-0.8B.
+
+    Complements the HTTP-URL ``mm_agg_qwen3.5-0.8b`` profile config by
+    exercising the inline ``data:image/png;base64,...`` transport path on
+    the same hybrid Mamba/full-attention VL model. Sends a base64-encoded
+    PNG plus a color prompt and asserts the response mentions the expected
+    color.
+    """
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["green"],
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+    config = VLLMConfig(
+        name="test_multimodal_b64_qwen3.5_0.8b",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[],
+        model="Qwen/Qwen3.5-0.8B",
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
+        script_args=["--model", "Qwen/Qwen3.5-0.8B"],
+        delayed_start=0,
+        timeout=600,
+        request_payloads=[b64_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
 
