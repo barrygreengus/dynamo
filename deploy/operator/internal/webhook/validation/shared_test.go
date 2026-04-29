@@ -261,10 +261,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
 		},
 		{
-			// Default operator config (DYN_OPERATOR_ALLOW_GMS_CHECKPOINT
-			// unset) — the public reject contract from #8689. This is the
-			// regression baseline for ordinary user CRs.
-			name: "checkpoint with gpuMemoryService is temporarily rejected",
+			name: "checkpoint with gpuMemoryService is accepted without failover",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Resources:     workerGPU,
@@ -282,8 +279,34 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			},
 			fieldPath:           "spec.services[worker]",
 			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "checkpoint with gpuMemoryService and failover is rejected unless bypass is enabled",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 1,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
-			errMsg:              "spec.services[worker].checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; disable either checkpointing or gpuMemoryService for this service",
+			errMsg:              "spec.services[worker].checkpoint: checkpointing with gpuMemoryService and failover is not enabled yet; disable failover for this service or set the internal bypass flag",
 		},
 		{
 			// Same shape as the case above with the operator-level bypass

@@ -36,6 +36,7 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	GMSArtifactDir   string
 	// RestoreTargetContainers is the list of container names in the
 	// restore pod that the snapshot agent should restore the checkpoint
 	// into. Empty means "use the default target" (the container named

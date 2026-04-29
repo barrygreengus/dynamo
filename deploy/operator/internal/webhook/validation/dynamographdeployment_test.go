@@ -749,7 +749,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:         "checkpoint with inter-pod GMS is temporarily rejected",
+			name:         "checkpoint with inter-pod GMS is accepted without failover",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -779,12 +779,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "checkpointing with gpuMemoryService is temporarily disabled",
+			wantErr: false,
 		},
 		{
-			name: "checkpoint with intra-pod GMS is temporarily rejected",
+			name: "checkpoint with intra-pod GMS is accepted without failover",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-intrapod-gms-snapshot",
@@ -813,9 +811,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "checkpointing with gpuMemoryService is temporarily disabled",
+			wantErr: false,
 		},
 		{
 			// PR #8631 follow-on: with the operator-level bypass flag set

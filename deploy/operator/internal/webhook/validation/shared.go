@@ -438,6 +438,9 @@ func (v *SharedSpecValidator) validateCheckpointWithGPUMemoryService() error {
 	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
 		return nil
 	}
+	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
+		return nil
+	}
 
 	// Internal-only bypass for the rule below. Sourced from the operator's
 	// DYN_OPERATOR_ALLOW_GMS_CHECKPOINT env var via WithAllowGMSCheckpoint.
@@ -449,8 +452,8 @@ func (v *SharedSpecValidator) validateCheckpointWithGPUMemoryService() error {
 	}
 
 	return fmt.Errorf(
-		"%s.checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; "+
-			"disable either checkpointing or gpuMemoryService for this service",
+		"%s.checkpoint: checkpointing with gpuMemoryService and failover is not enabled yet; "+
+			"disable failover for this service or set the internal bypass flag",
 		v.fieldPath)
 }
 
