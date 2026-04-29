@@ -70,8 +70,8 @@ class HttpArgs:
     # Total pool size cap.
     #   httpx: ``Limits.max_connections``
     #   aiohttp: ``TCPConnector.limit``
-    # Default 100. Bigger pool → more concurrent connections allowed,
-    # at the cost of more open file descriptors.
+    # Bigger pool → more concurrent connections allowed, at the cost of more
+    # open file descriptors.
     max_connections: int
 
     # Override for the per-call ``timeout`` arg passed to ``fetch_bytes``.
@@ -115,7 +115,7 @@ class HttpArgs:
 
 def from_env() -> HttpArgs:
     """Build an :class:`HttpArgs` from the current environment."""
-    max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 100)
+    max_connections = _env_int("DYN_MM_HTTP_MAX_CONNECTIONS", 200)
     raw_read = _env_float("DYN_MM_HTTP_READ_TIMEOUT", -1.0)
     return HttpArgs(
         # shared
