@@ -214,23 +214,6 @@ async def test_http_scheme_rejected_by_default(monkeypatch) -> None:
     assert mock_fetch.call_count == 0
 
 
-async def test_blocked_private_ip_rejected(monkeypatch) -> None:
-    """Cloud metadata / private IPs must be rejected even over https."""
-    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
-
-    strict_loader = ImageLoader(
-        cache_size=4,
-        http_timeout=30.0,
-        url_policy=UrlValidationPolicy(
-            allow_http=True,
-            allow_private_ips=False,
-        ),
-    )
-
-    with pytest.raises(ValueError, match="blocked range"):
-        await strict_loader.load_image("https://169.254.169.254/latest/meta-data/")
-
-
 # --- HTTP error contract ---
 
 

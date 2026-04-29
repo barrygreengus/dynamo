@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import socket
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -20,6 +20,7 @@ from dynamo.common.multimodal.url_validator import (
     UrlValidationPolicy,
     is_blocked_ip,
     validate_local_path,
+    validate_media_url,
     validate_url,
 )
 
@@ -313,3 +314,72 @@ def test_policy_from_env_allow_internal(monkeypatch) -> None:
 # Fetch-with-revalidation tests now live in test_http_backends.py where
 # they exercise the backend-neutral facade path against both httpx and
 # aiohttp. See ``test_fetch_with_policy_*``.
+
+
+# ---------------------------------------------------------------------------
+# validate_media_url() — high-level facade used by media loaders
+#
+# Exercised here once with a generic file extension; the per-loader test files
+# only keep a single wiring smoke test confirming the loader plumbs its
+# url_policy through to this function.
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_media_url_converts_local_paths(tmp_path) -> None:
+    media_path = tmp_path / "sample.bin"
+    media_path.write_bytes(b"data")
+
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    assert (
+        await validate_media_url(str(media_path), policy)
+        == media_path.resolve().as_uri()
+    )
+
+
+async def test_validate_media_url_preserves_data_urls() -> None:
+    data_url = "data:application/octet-stream;base64,Zm9v"
+    policy = UrlValidationPolicy()
+    assert await validate_media_url(data_url, policy) == data_url
+
+
+async def test_validate_media_url_preserves_http_urls() -> None:
+    url = "https://example.com/sample.bin"
+    assert await validate_media_url(url, PERMISSIVE) == url
+
+
+async def test_validate_media_url_rejects_bare_path_by_default(tmp_path) -> None:
+    media_path = tmp_path / "sample.bin"
+    media_path.write_bytes(b"data")
+
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError, match="Local media paths are not permitted"):
+        await validate_media_url(str(media_path), policy)
+
+
+async def test_validate_media_url_rejects_private_ip() -> None:
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError):
+        await validate_media_url("https://169.254.169.254/sample.bin", policy)
+
+
+async def test_validate_media_url_accepts_file_uri_inside_prefix(tmp_path) -> None:
+    media_path = tmp_path / "sample.bin"
+    media_path.write_bytes(b"data")
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    file_uri = media_path.resolve().as_uri()
+    assert await validate_media_url(file_uri, policy) == file_uri
+
+
+async def test_validate_media_url_rejects_file_uri_outside_prefix(tmp_path) -> None:
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    other = tmp_path / "secret.bin"
+    other.write_bytes(b"data")
+    policy = UrlValidationPolicy(allowed_local_path=str(allowed))
+
+    with pytest.raises(UrlValidationError, match="outside the allowed directory"):
+        await validate_media_url(other.resolve().as_uri(), policy)
