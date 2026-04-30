@@ -31,17 +31,9 @@ const (
 )
 
 // EnsureGMSRestoreSidecars appends GMS server + loader containers to the pod
-// spec for a checkpoint restore. Both are appended to InitContainers with
-// RestartPolicy=Always — i.e. they are Kubernetes 1.28+ "init sidecars": init
-// containers that run forever and parallelize with the regular containers
-// that follow them, gating pod-Ready via their own startup probes.
-//
-// They cannot be plain regular containers because the engine's restore-target
-// container (whose Command/Args we replaced with `sleep infinity` and whose
-// readiness is gated by the synthesized restore StartupProbe) needs the GMS
-// server's UDS sockets to exist *before* CRIU resumes the workload's process.
-// Init-sidecar ordering gives us "GMS up before engine is Ready" without
-// blocking other regular containers from starting.
+// spec for a checkpoint restore. They are regular containers so Kubernetes can
+// start them in parallel with the restore target; snapshot-agent only needs the
+// restore target's container ID before it can launch nsrestore.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -51,21 +43,10 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	// The DGD path already added gms-server as an init sidecar. Drop the
-	// existing entry so we can re-append both gms-server and gms-loader as
-	// init sidecars below in a deterministic order.
-	for i := range podSpec.InitContainers {
-		if podSpec.InitContainers[i].Name == gms.ServerContainerName {
-			podSpec.InitContainers = append(podSpec.InitContainers[:i], podSpec.InitContainers[i+1:]...)
-			break
-		}
-	}
 	gms.EnsureSharedVolume(podSpec, mainContainer)
-
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
 	server := gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image)
-	server.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 
 	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
@@ -73,9 +54,10 @@ func EnsureGMSRestoreSidecars(
 		corev1.EnvVar{Name: EnvCheckpointDir, Value: ResolveGMSArtifactDir(storage)},
 		PodUIDEnvVar(),
 	)
-	loader.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 
-	podSpec.InitContainers = append(podSpec.InitContainers, server, loader)
+	podSpec.InitContainers = removeGMSRestoreSidecars(podSpec.InitContainers)
+	podSpec.Containers = removeGMSRestoreSidecars(podSpec.Containers)
+	podSpec.Containers = append(podSpec.Containers, server, loader)
 }
 
 // EnsureGMSCheckpointJobSidecars adds GMS server (init) + saver containers
@@ -132,4 +114,15 @@ func ResolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
 	artifactVersion := filepath.Base(storage.Location)
 	checkpointID := filepath.Base(filepath.Dir(filepath.Dir(storage.Location)))
 	return filepath.Join(storage.BasePath, "gms", checkpointID, "versions", artifactVersion)
+}
+
+func removeGMSRestoreSidecars(containers []corev1.Container) []corev1.Container {
+	filtered := containers[:0]
+	for _, container := range containers {
+		if container.Name == gms.ServerContainerName || container.Name == GMSLoaderContainer {
+			continue
+		}
+		filtered = append(filtered, container)
+	}
+	return filtered
 }
