@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Async fetch loop with per-request latency capture.
 
 Sets ``DYN_MM_HTTP_BACKEND`` for the chosen backend, calls

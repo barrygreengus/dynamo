@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Sweep aiohttp vs httpx through dynamo.common.http.
 
 Rate-limited emitter. For each (request_rate, server-processing-time-mean-ms)

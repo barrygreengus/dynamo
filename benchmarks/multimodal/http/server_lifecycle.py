@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Spawn the local media server as a subprocess; tear it down on exit.
 
 Used by ``sweep.py`` to bring up a fresh server with a different

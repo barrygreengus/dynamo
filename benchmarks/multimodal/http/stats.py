@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Aggregate ``RunResult`` samples into a ``Summary`` (avg, p50, p90, p99).
 
 Latency stats are computed over success samples only — including timeout
