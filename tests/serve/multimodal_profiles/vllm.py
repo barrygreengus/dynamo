@@ -25,17 +25,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=220,
                 profiled_vram_gib=9.6,
                 b64_variants=[
                     # Inline base64 image through the Rust frontend decode
                     # path (--frontend-decoding). Exercises strip_inline_data_urls
-                    # + NIXL RDMA on a different cadence than the HTTP-URL test.
+                    # + NIXL RDMA — distinct code path from the HTTP-URL test.
                     B64Variant(
                         suffix="frontend_decoding",
                         extra_script_args=["--frontend-decoding"],
-                        marks=[pytest.mark.pre_merge],
                     ),
                 ],
             ),
@@ -87,19 +86,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
         request_payloads=[make_video_payload(["red", "static", "still"])],
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen2.5-VL-7B-Instruct",
-        short_name="qwen2.5-vl-7b",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=360,
-                profiled_vram_gib=19.9,
-                requested_vllm_kv_cache_bytes=922_354_000,
-            ),
-        },
-        request_payloads=[make_image_payload(["purple"])],
     ),
     # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
     # Jinja engine cannot render multimodal content arrays (audio_url).
