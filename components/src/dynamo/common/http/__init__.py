@@ -46,7 +46,7 @@ _VALID_BACKENDS = ("aiohttp", "httpx")
 _default: Optional[MmHttpClient] = None
 
 
-def _create_default_client() -> MmHttpClient:
+def _create_client() -> MmHttpClient:
     """Pick a concrete client class based on ``DYN_MM_HTTP_BACKEND``."""
     name = os.environ.get("DYN_MM_HTTP_BACKEND", "aiohttp").lower()
     if name == "aiohttp":
@@ -62,7 +62,7 @@ def get_default_client() -> MmHttpClient:
     """Return the process-wide singleton client, instantiating on first call."""
     global _default
     if _default is None:
-        _default = _create_default_client()
+        _default = _create_client()
         logger.info("Multimodal HTTP backend resolved: %s", type(_default).__name__)
     return _default
 
