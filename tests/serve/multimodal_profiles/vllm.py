@@ -4,6 +4,7 @@
 import pytest
 
 from tests.utils.multimodal import (
+    B64Variant,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
@@ -27,6 +28,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=220,
                 profiled_vram_gib=9.6,
+                b64_variants=[
+                    # Inline base64 image through the Rust frontend decode
+                    # path (--frontend-decoding). Exercises strip_inline_data_urls
+                    # + NIXL RDMA on a different cadence than the HTTP-URL test.
+                    B64Variant(
+                        suffix="frontend_decoding",
+                        extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.pre_merge],
+                    ),
+                ],
             ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
@@ -54,6 +65,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
                 profiled_vram_gib=4.0,
+                b64_variants=[B64Variant()],
             ),
         },
         request_payloads=[make_image_payload(["green"])],

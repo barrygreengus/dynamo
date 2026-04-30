@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any, Optional, Type
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import MULTIMODAL_IMG_URL
+from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, ChatPayload
@@ -30,15 +31,16 @@ AUDIO_TEST_URL = (
 # ---------------------------------------------------------------------------
 
 
+_MULTIMODAL_COLOR_PROMPT = (
+    "What colors are in the following image? Respond only with the colors."
+)
+
+
 def make_image_payload(expected_response: list[str]) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL."""
     return chat_payload(
         [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? "
-                "Respond only with the colors.",
-            },
+            {"type": "text", "text": _MULTIMODAL_COLOR_PROMPT},
             {
                 "type": "image_url",
                 "image_url": {"url": MULTIMODAL_IMG_URL},
@@ -48,6 +50,92 @@ def make_image_payload(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+    )
+
+
+class Base64LazyChatPayload(ChatPayload):
+    """ChatPayload variant that defers reading the multimodal test PNG until
+    the first `.body` access.
+
+    The LFS-tracked test image may be a pointer file when the workspace is
+    fresh; eager reads at module import (i.e. pytest collection) would fail
+    before pytest can apply the test's hardware preconditions. Materializing
+    on first `.body` read defers that I/O to test execution.
+    """
+
+    def __init__(
+        self,
+        *,
+        prompt: str,
+        expected_response: list[str],
+        max_tokens: int = 100,
+        temperature: float = 0.0,
+        repeat_count: int = 1,
+        timeout: int = 60,
+    ):
+        # Initialize the lazy state BEFORE super().__init__ — the parent
+        # dataclass __init__ assigns self.body = ..., which routes through
+        # our @body.setter and reads `_b64_storage`.
+        object.__setattr__(self, "_b64_prompt", prompt)
+        object.__setattr__(self, "_b64_max_tokens", max_tokens)
+        object.__setattr__(self, "_b64_temperature", temperature)
+        object.__setattr__(self, "_b64_storage", None)
+        object.__setattr__(self, "_b64_materialized", False)
+        super().__init__(
+            body=None,  # placeholder; replaced when .body is first read
+            expected_response=expected_response,
+            expected_log=[],
+            repeat_count=repeat_count,
+            timeout=timeout,
+        )
+
+    def _materialize_body(self) -> dict:
+        b64 = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+        ref = chat_payload(
+            [
+                {"type": "text", "text": self._b64_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                },
+            ],
+            repeat_count=1,
+            expected_response=list(self.expected_response),
+            max_tokens=self._b64_max_tokens,
+            temperature=self._b64_temperature,
+        )
+        return ref.body
+
+    @property
+    def body(self) -> dict:  # type: ignore[override]
+        if not self._b64_materialized:
+            object.__setattr__(self, "_b64_storage", self._materialize_body())
+            object.__setattr__(self, "_b64_materialized", True)
+        return self._b64_storage
+
+    @body.setter
+    def body(self, value) -> None:
+        # External writes (e.g. with_model({**body, "model": ...})) overwrite
+        # storage. Do NOT flip _b64_materialized here — the parent dataclass
+        # __init__ writes a placeholder (None) before lazy reads happen, and
+        # we want the next .body read to still materialize when storage is
+        # the placeholder. with_model writes happen AFTER materialization, so
+        # _b64_materialized is already True and the new value is preserved.
+        object.__setattr__(self, "_b64_storage", value)
+
+
+def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
+    """Inline-base64 PNG variant of :func:`make_image_payload`.
+
+    The image bytes are read lazily on first `.body` access so pytest
+    collection does not fail when the LFS image pointer has not been pulled.
+    """
+    return Base64LazyChatPayload(
+        prompt=_MULTIMODAL_COLOR_PROMPT,
+        expected_response=expected_response,
+        max_tokens=100,
+        temperature=0.0,
+        repeat_count=1,
     )
 
 
@@ -91,6 +179,26 @@ def make_audio_payload(expected_response: list[str]) -> ChatPayload:
 
 
 @dataclass
+class B64Variant:
+    """Variant of a topology that uses an inline base64 image payload.
+
+    Each variant emits an additional config keyed
+    ``mm_{topology}_{short_name}_b64[_{suffix}]`` with the same script and env
+    as the topology's HTTP-URL config, but with a :class:`Base64LazyChatPayload`
+    instead of the profile's HTTP payload.
+
+    All fields are optional overrides on top of the parent ``TopologyConfig``;
+    leaving a field unset inherits from the topology / profile.
+    """
+
+    suffix: str = ""  # extra suffix on the config key (e.g. "frontend_decoding")
+    extra_script_args: list[str] = field(default_factory=list)
+    marks: list[Any] = field(default_factory=list)  # if empty, inherit topology marks
+    timeout_s: Optional[int] = None  # if None, inherit topology timeout
+    expected_response: Optional[list[str]] = None  # if None, inherit profile's color
+
+
+@dataclass
 class TopologyConfig:
     """Per-topology overrides for marks, timeout, and VRAM profiling."""
 
@@ -103,6 +211,7 @@ class TopologyConfig:
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
+    b64_variants: list[B64Variant] = field(default_factory=list)
 
 
 @dataclass
@@ -195,4 +304,62 @@ def make_multimodal_configs(
             request_payloads=profile.request_payloads,
             env=worker_env,
         )
+
+        # Emit one extra config per b64 variant. The variant reuses the
+        # topology's script + env but swaps the HTTP-URL payload for an
+        # inline base64 payload (lazy-loaded at test execution).
+        for variant in topo_cfg.b64_variants:
+            v_suffix = f"_{variant.suffix}" if variant.suffix else ""
+            v_key = f"mm_{topology}_{profile.short_name}_b64{v_suffix}"
+
+            v_timeout = variant.timeout_s or topo_cfg.timeout_s
+            v_marks: list[Any] = [
+                getattr(pytest.mark, gpu),
+                pytest.mark.timeout(v_timeout),
+            ]
+            v_marks.extend(variant.marks if variant.marks else topo_cfg.marks)
+            if topo_cfg.profiled_vram_gib is not None:
+                v_marks.append(
+                    pytest.mark.profiled_vram_gib(topo_cfg.profiled_vram_gib)
+                )
+            if topo_cfg.requested_vllm_kv_cache_bytes is not None:
+                v_marks.append(
+                    pytest.mark.requested_vllm_kv_cache_bytes(
+                        topo_cfg.requested_vllm_kv_cache_bytes
+                    )
+                )
+            if profile.gated:
+                v_marks.append(
+                    pytest.mark.skipif(
+                        not os.environ.get("DYN_HF_GATED_MODELS_ENABLED"),
+                        reason=(
+                            f"{profile.name} is gated; set "
+                            "DYN_HF_GATED_MODELS_ENABLED=1 with an HF_TOKEN "
+                            "that has accepted the license"
+                        ),
+                    )
+                )
+            v_marks.extend(profile.marks)
+
+            default_expected: list[str] = []
+            if profile.request_payloads:
+                default_expected = list(
+                    getattr(profile.request_payloads[0], "expected_response", []) or []
+                )
+            v_expected = variant.expected_response or default_expected
+
+            v_script_args = list(script_args) + list(variant.extra_script_args)
+
+            configs[v_key] = config_cls(
+                name=v_key,
+                directory=topo_cfg.directory or directory,
+                script_name=script_name,
+                model=profile.name,
+                script_args=v_script_args,
+                marks=v_marks,
+                delayed_start=topo_cfg.delayed_start,
+                request_payloads=[make_image_payload_b64(v_expected)],
+                env=worker_env,
+            )
+
     return configs
