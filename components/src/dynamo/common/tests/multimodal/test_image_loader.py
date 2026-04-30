@@ -22,9 +22,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from PIL import Image
 
-from dynamo.common.multimodal.http import MmHttpStatusError, MmHttpTimeout
+from dynamo.common.http import MmHttpStatusError, MmHttpTimeout
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.url_validator import UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.asyncio,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures for multimodal tests.
+"""Shared fixtures for HTTP facade tests.
 
 Autouse fixture ensures the shared HTTP client singleton is closed after
 each test so ``DYN_MM_HTTP_BACKEND`` changes take effect between runs and

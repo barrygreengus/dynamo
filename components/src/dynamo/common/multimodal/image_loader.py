@@ -18,13 +18,8 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http import (
-    MmHttpError,
-    MmHttpStatusError,
-    MmHttpTimeout,
-    fetch_bytes,
-)
-from .url_validator import UrlValidationPolicy, validate_media_url
+from ..http import MmHttpError, MmHttpStatusError, MmHttpTimeout, fetch_bytes
+from ..http.url_validator import UrlValidationPolicy, validate_media_url
 
 logger = logging.getLogger(__name__)
 

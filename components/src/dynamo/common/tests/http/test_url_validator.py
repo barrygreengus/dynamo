@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for ``dynamo.common.multimodal.url_validator``.
+"""Unit tests for ``dynamo.common.http.url_validator``.
 
 These cover scheme / IP / hostname / path / redirect logic in isolation of
 the media loaders, so they run quickly with no network and no vLLM imports.
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from dynamo.common.multimodal.url_validator import (
+from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     is_blocked_ip,
@@ -183,7 +183,7 @@ def _fake_getaddrinfo(addrs: list[str]):
 
 async def test_validate_url_rejects_host_resolving_to_private_ip() -> None:
     with patch(
-        "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
+        "dynamo.common.http.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["10.0.0.5"]),
     ):
         with pytest.raises(UrlValidationError, match="blocked IP"):
@@ -193,7 +193,7 @@ async def test_validate_url_rejects_host_resolving_to_private_ip() -> None:
 async def test_validate_url_rejects_host_if_any_ip_is_private() -> None:
     # Even if the host resolves to a public IP too, any blocked IP is fatal.
     with patch(
-        "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
+        "dynamo.common.http.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["8.8.8.8", "169.254.169.254"]),
     ):
         with pytest.raises(UrlValidationError, match="169.254.169.254"):
@@ -202,7 +202,7 @@ async def test_validate_url_rejects_host_if_any_ip_is_private() -> None:
 
 async def test_validate_url_accepts_public_host() -> None:
     with patch(
-        "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
+        "dynamo.common.http.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["93.184.216.34"]),
     ):
         await validate_url("https://example.com/x.png", STRICT_HTTPS)
@@ -210,7 +210,7 @@ async def test_validate_url_accepts_public_host() -> None:
 
 async def test_validate_url_resolution_failure_raises() -> None:
     with patch(
-        "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
+        "dynamo.common.http.url_validator.socket.getaddrinfo",
         side_effect=socket.gaierror("nodename nor servname provided"),
     ):
         with pytest.raises(UrlValidationError, match="Could not resolve"):
@@ -219,7 +219,7 @@ async def test_validate_url_resolution_failure_raises() -> None:
 
 async def test_validate_url_skips_resolution_when_private_allowed() -> None:
     # In developer mode we short-circuit DNS to keep tests deterministic.
-    with patch("dynamo.common.multimodal.url_validator.socket.getaddrinfo") as resolver:
+    with patch("dynamo.common.http.url_validator.socket.getaddrinfo") as resolver:
         await validate_url("https://example.com/x.png", PERMISSIVE)
         resolver.assert_not_called()
 

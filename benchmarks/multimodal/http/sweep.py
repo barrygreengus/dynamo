@@ -1,4 +1,4 @@
-"""Sweep aiohttp vs httpx through dynamo.common.multimodal.http.
+"""Sweep aiohttp vs httpx through dynamo.common.http.
 
 Rate-limited emitter. For each (request_rate, server-processing-time-mean-ms)
 pair, brings up a local media server with that processing-time-mean and

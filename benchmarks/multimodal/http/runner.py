@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from dynamo.common.multimodal.http import close_http_client, fetch_bytes
+from dynamo.common.http import close_http_client, fetch_bytes
 
 
 @dataclass

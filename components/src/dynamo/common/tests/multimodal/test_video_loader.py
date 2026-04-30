@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
-from dynamo.common.multimodal.url_validator import UrlValidationPolicy
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [

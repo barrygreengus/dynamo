@@ -1,24 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for ``aiohttp_backend`` exception mapping + redirect parsing.
+"""Unit tests for ``AiohttpClient`` exception mapping + redirect parsing.
 
-Module-level singleton (``_session``) is replaced via ``patch.object``;
-the autouse ``_close_shared_http_client`` fixture in
-``conftest.py`` resets backend state between tests.
+The session singleton is held on the client instance (``client._session``)
+and replaced via ``patch.object``; the autouse
+``_close_shared_http_client`` fixture in ``conftest.py`` resets the
+process-wide singleton between tests.
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
 from yarl import URL
 
-from dynamo.common.multimodal import http as mm_http
-from dynamo.common.multimodal.http import aiohttp_backend
+from dynamo.common import http as mm_http
+from dynamo.common.http import AiohttpClient
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -76,13 +77,19 @@ def _cm_raising(exc_factory):
     return _get
 
 
+def _make_client_with_session(session) -> AiohttpClient:
+    client = AiohttpClient()
+    client._session = session
+    return client
+
+
 async def test_fetch_bytes_returns_body_on_200() -> None:
     response = _FakeResponse(status=200, body=b"hello")
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
     session.get = _cm_returning(response)
-    with patch.object(aiohttp_backend, "_session", session):
-        result = await aiohttp_backend.fetch_bytes("https://h/x", 30.0)
+    client = _make_client_with_session(session)
+    result = await client.fetch_bytes("https://h/x", 30.0)
     assert result == b"hello"
 
 
@@ -90,9 +97,9 @@ async def test_fetch_bytes_maps_timeout() -> None:
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
     session.get = _cm_raising(lambda: asyncio.TimeoutError())
-    with patch.object(aiohttp_backend, "_session", session):
-        with pytest.raises(mm_http.MmHttpTimeout):
-            await aiohttp_backend.fetch_bytes("https://h/x", 30.0)
+    client = _make_client_with_session(session)
+    with pytest.raises(mm_http.MmHttpTimeout):
+        await client.fetch_bytes("https://h/x", 30.0)
 
 
 async def test_fetch_bytes_maps_status() -> None:
@@ -104,19 +111,19 @@ async def test_fetch_bytes_maps_status() -> None:
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
     session.get = _cm_raising(_mk_error)
-    with patch.object(aiohttp_backend, "_session", session):
-        with pytest.raises(mm_http.MmHttpStatusError) as exc:
-            await aiohttp_backend.fetch_bytes("https://h/x", 30.0)
-        assert exc.value.status == 404
+    client = _make_client_with_session(session)
+    with pytest.raises(mm_http.MmHttpStatusError) as exc:
+        await client.fetch_bytes("https://h/x", 30.0)
+    assert exc.value.status == 404
 
 
 async def test_fetch_bytes_maps_connection_error() -> None:
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
     session.get = _cm_raising(lambda: aiohttp.ClientConnectionError("refused"))
-    with patch.object(aiohttp_backend, "_session", session):
-        with pytest.raises(mm_http.MmHttpConnectionError):
-            await aiohttp_backend.fetch_bytes("https://h/x", 30.0)
+    client = _make_client_with_session(session)
+    with pytest.raises(mm_http.MmHttpConnectionError):
+        await client.fetch_bytes("https://h/x", 30.0)
 
 
 async def test_fetch_body_or_redirect_returns_absolute_next_url_on_302() -> None:
@@ -128,9 +135,7 @@ async def test_fetch_body_or_redirect_returns_absolute_next_url_on_302() -> None
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
     session.get = _cm_returning(response)
-    with patch.object(aiohttp_backend, "_session", session):
-        body, next_url = await aiohttp_backend.fetch_body_or_redirect(
-            "https://h/x.png", 30.0
-        )
+    client = _make_client_with_session(session)
+    body, next_url = await client.fetch_body_or_redirect("https://h/x.png", 30.0)
     assert body is None
     assert next_url == "https://h/next.png"

@@ -9,11 +9,8 @@ from urllib.parse import urlparse
 import numpy as np
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.multimodal.http import fetch_bytes
-from dynamo.common.multimodal.url_validator import (
-    UrlValidationPolicy,
-    validate_media_url,
-)
+from dynamo.common.http import fetch_bytes
+from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async

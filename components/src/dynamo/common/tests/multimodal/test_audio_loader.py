@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
-from dynamo.common.multimodal.url_validator import UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.unit,
