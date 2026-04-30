@@ -4,11 +4,12 @@
 import pytest
 
 from tests.utils.multimodal import (
-    B64Variant,
+    MmCase,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
     make_image_payload,
+    make_image_payload_b64,
     make_video_payload,
 )
 
@@ -25,22 +26,28 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
-                # Vanilla / baseline single-GPU multimodal smoke. Kept on
-                # pre_merge so every PR exercises the simplest happy-path
-                # multimodal config (HTTP-URL image, no frontend decoding).
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge],  # default cadence; cases override
                 timeout_s=220,
                 profiled_vram_gib=9.6,
-                b64_variants=[
+                tests=[
+                    # Vanilla / baseline single-GPU multimodal smoke. Kept on
+                    # pre_merge so every PR exercises the simplest happy-path
+                    # multimodal config (HTTP-URL image, no frontend decoding).
+                    MmCase(payload=make_image_payload(["green"])),
                     # Vanilla inline base64 path (no Rust frontend decode).
                     # post_merge: the b64 codec on pre_merge is exercised
-                    # by the qwen3.5-0.8b frontend_decoding variant.
-                    B64Variant(marks=[pytest.mark.post_merge]),
+                    # by the qwen3.5-0.8b frontend_decoding case.
+                    MmCase(
+                        suffix="b64",
+                        payload=make_image_payload_b64(["green"]),
+                        marks=[pytest.mark.post_merge],
+                    ),
                     # Rust frontend image decode (--frontend-decoding):
                     # strip_inline_data_urls + NIXL RDMA path. Distinct
                     # transport from the vanilla b64 above.
-                    B64Variant(
-                        suffix="frontend_decoding",
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
                     ),
@@ -50,19 +57,21 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=340,
                 single_gpu=True,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
-        request_payloads=[make_image_payload(["green"])],
     ),
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",
@@ -72,20 +81,23 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 profiled_vram_gib=4.0,
-                b64_variants=[
+                tests=[
+                    # HTTP-URL color test on hybrid Mamba/full-attention VL.
+                    # post_merge — qwen3-vl-2b carries the pre_merge baseline.
+                    MmCase(payload=make_image_payload(["green"])),
                     # Production dependency: this is the only pre_merge
                     # gate on the inline-base64 + Rust frontend decode path
                     # (strip_inline_data_urls + NIXL RDMA). Any regression
                     # here must surface on the PR that introduces it.
-                    B64Variant(
-                        suffix="frontend_decoding",
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.pre_merge],
                     ),
                 ],
             ),
         },
-        request_payloads=[make_image_payload(["green"])],
     ),
     MultimodalModelProfile(
         name="Qwen/Qwen3-VL-2B-Instruct",
@@ -95,15 +107,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
                 delayed_start=60,
+                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
+                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
         },
-        request_payloads=[make_video_payload(["red", "static", "still"])],
     ),
     # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
     # Jinja engine cannot render multimodal content arrays (audio_url).
@@ -121,9 +134,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 env={"DYN_CHAT_PROCESSOR": "vllm"},
+                tests=[MmCase(payload=make_audio_payload(["Hester", "Pynne"]))],
             ),
         },
-        request_payloads=[make_audio_payload(["Hester", "Pynne"])],
         extra_vllm_args=["--max-model-len", "7232"],
     ),
     MultimodalModelProfile(
@@ -134,14 +147,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 profiled_vram_gib=12.0,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
-        request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
         gated=True,
     ),
     # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
     # We may use less GPUs by squeezing the model onto 2 GPUs.
+    # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
+    # keep this as a multimodal serving smoke check, not a color oracle.
     MultimodalModelProfile(
         name="llava-hf/llava-1.5-7b-hf",
         short_name="llava-1.5-7b",
@@ -150,29 +165,46 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=340,
                 gpu_marker="gpu_4",
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(
+                            [
+                                "green",
+                                "white",
+                                "black",
+                                "purple",
+                                "red",
+                                "pink",
+                                "yellow",
+                                "blue",
+                                "orange",
+                            ]
+                        )
+                    )
+                ],
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 gpu_marker="gpu_4",
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(
+                            [
+                                "green",
+                                "white",
+                                "black",
+                                "purple",
+                                "red",
+                                "pink",
+                                "yellow",
+                                "blue",
+                                "orange",
+                            ]
+                        )
+                    )
+                ],
             ),
         },
-        # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
-        # keep this as a multimodal serving smoke check, not a color oracle.
-        request_payloads=[
-            make_image_payload(
-                [
-                    "green",
-                    "white",
-                    "black",
-                    "purple",
-                    "red",
-                    "pink",
-                    "yellow",
-                    "blue",
-                    "orange",
-                ]
-            )
-        ],
     ),
 ]
