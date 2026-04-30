@@ -25,16 +25,24 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
+                # Vanilla / baseline single-GPU multimodal smoke. Kept on
+                # pre_merge so every PR exercises the simplest happy-path
+                # multimodal config (HTTP-URL image, no frontend decoding).
                 marks=[pytest.mark.pre_merge],
                 timeout_s=220,
                 profiled_vram_gib=9.6,
                 b64_variants=[
-                    # Inline base64 image through the Rust frontend decode
-                    # path (--frontend-decoding). Exercises strip_inline_data_urls
-                    # + NIXL RDMA — distinct code path from the HTTP-URL test.
+                    # Vanilla inline base64 path (no Rust frontend decode).
+                    # post_merge: the b64 codec on pre_merge is exercised
+                    # by the qwen3.5-0.8b frontend_decoding variant.
+                    B64Variant(marks=[pytest.mark.post_merge]),
+                    # Rust frontend image decode (--frontend-decoding):
+                    # strip_inline_data_urls + NIXL RDMA path. Distinct
+                    # transport from the vanilla b64 above.
                     B64Variant(
                         suffix="frontend_decoding",
                         extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.post_merge],
                     ),
                 ],
             ),
@@ -61,10 +69,20 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3.5-0.8b",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 profiled_vram_gib=4.0,
-                b64_variants=[B64Variant()],
+                b64_variants=[
+                    # Production dependency: this is the only pre_merge
+                    # gate on the inline-base64 + Rust frontend decode path
+                    # (strip_inline_data_urls + NIXL RDMA). Any regression
+                    # here must surface on the PR that introduces it.
+                    B64Variant(
+                        suffix="frontend_decoding",
+                        extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.pre_merge],
+                    ),
+                ],
             ),
         },
         request_payloads=[make_image_payload(["green"])],
