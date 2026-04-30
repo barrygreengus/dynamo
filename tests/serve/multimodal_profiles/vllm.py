@@ -98,19 +98,26 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
         extra_vllm_args=["--max-model-len", "7232"],
     ),
+    # Non-Qwen VLM coverage: gemma-4-E2B-it is the only non-Qwen multimodal
+    # profile in the suite. It uses a different vision encoder family
+    # (PaliGemma-derived) and chat template, so it guards against
+    # Qwen-specific assumptions in the frontend / preprocessor paths.
+    # Disagg topologies (e_pd / epd) are NOT enabled here: the dedicated
+    # encode worker in components/src/dynamo/vllm/multimodal_utils/encode_utils.py
+    # only dispatches LLaVA + Qwen-VL families. Adding gemma-4 disagg
+    # support is a follow-up.
     MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
+        name="google/gemma-4-E2B-it",
+        short_name="gemma4-e2b-it",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 profiled_vram_gib=12.0,
             ),
         },
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
     ),
     # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
     # We may use less GPUs by squeezing the model onto 2 GPUs.
