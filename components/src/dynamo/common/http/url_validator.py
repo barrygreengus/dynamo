@@ -227,7 +227,4 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     return await validate_url(url, policy)
 
 
-# Redirect cap used by the backend-neutral fetch path in
-# ``dynamo.common.http``. Lives here because it's a policy constant
-# (like ``_BLOCKED_IP_NETWORKS``), not a transport concern.
 _MAX_REDIRECTS = 3
