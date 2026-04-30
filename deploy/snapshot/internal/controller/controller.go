@@ -46,7 +46,12 @@ type NodeController struct {
 	stopCh chan struct{}
 }
 
-const gmsCompletionPollInterval = 50 * time.Millisecond
+const (
+	gmsCompletionPollInterval        = 50 * time.Millisecond
+	restoreContainerResolveInterval  = 50 * time.Millisecond
+	restoreContainerResolveTimeout   = 30 * time.Second
+	restoreContainerResolveKeySuffix = "resolve"
+)
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -311,19 +316,81 @@ func (w *NodeController) maybeStartRestoreForContainer(
 	checkpointLocation string,
 	podKey string,
 ) {
-	containerID := ""
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name != containerName || cs.ContainerID == "" {
-			continue
-		}
-		containerID = snapshotruntime.StripCRIScheme(cs.ContainerID)
-		break
-	}
+	containerID := restoreContainerIDFromStatus(pod, containerName)
 	if containerID == "" {
-		w.log.V(1).Info("Restore pod has no running container yet", "pod", podKey, "container", containerName)
+		w.maybeStartRestoreContainerResolver(ctx, pod.DeepCopy(), containerName, checkpointID, checkpointLocation, podKey)
 		return
 	}
 
+	w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, podKey)
+}
+
+func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName && cs.ContainerID != "" {
+			return snapshotruntime.StripCRIScheme(cs.ContainerID)
+		}
+	}
+	return ""
+}
+
+func (w *NodeController) maybeStartRestoreContainerResolver(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	checkpointID string,
+	checkpointLocation string,
+	podKey string,
+) {
+	resolveKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, restoreContainerResolveKeySuffix)
+	if !w.tryAcquire(resolveKey) {
+		return
+	}
+
+	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; resolving via node runtime",
+		"pod", podKey,
+		"container", containerName,
+	)
+
+	go func() {
+		defer w.release(resolveKey)
+
+		resolveCtx, cancel := context.WithTimeout(ctx, restoreContainerResolveTimeout)
+		defer cancel()
+
+		ticker := time.NewTicker(restoreContainerResolveInterval)
+		defer ticker.Stop()
+
+		for {
+			containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
+			if err == nil && containerID != "" {
+				w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, podKey)
+				return
+			}
+
+			select {
+			case <-resolveCtx.Done():
+				w.log.V(1).Info("Timed out resolving restore container via node runtime",
+					"pod", podKey,
+					"container", containerName,
+					"err", err,
+				)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (w *NodeController) startRestoreForContainer(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	containerID string,
+	checkpointID string,
+	checkpointLocation string,
+	podKey string,
+) {
 	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotationFor(containerName)]
 	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotationFor(containerName)]
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
