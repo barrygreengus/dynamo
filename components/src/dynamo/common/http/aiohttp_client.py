@@ -1,23 +1,73 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""aiohttp implementation of :class:`MmHttpClient`.
+"""aiohttp implementation of :class:`MmHttpClient` — the default backend.
 
-Owns an ``aiohttp.ClientSession`` singleton mirroring vLLM's
-``HTTPConnection.get_async_client`` pattern, with an explicit
-``TCPConnector`` so single-origin fan-out has all pool slots available.
+Why aiohttp is the default
+--------------------------
 
-Behavior notes (operator-tunable knobs live in :mod:`.args`):
+Under high concurrency (e.g. one request fanning out to 100 image
+URLs) the httpx backend hits ``httpx.PoolTimeout``. aiohttp scales
+markedly better on the same workload — see
+https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html
+and https://github.com/openai/openai-python/issues/1596.
 
-  - ``limit_per_host=0`` is hard-coded — unlimited per host, load-bearing
-    for single-origin fan-out, not something an operator should be able
-    to silently shrink.
-  - ``enable_cleanup_closed=True`` purges half-closed TLS sockets.
-  - ``trust_env=False`` matches today's behavior; flip in a follow-up
-    PR after a proxy-impact review.
-  - Per-request timeout is a ``ClientTimeout(total=timeout)`` — covers
-    pool wait + connect + read + body in one budget, same shape as
-    vLLM.
+Root cause is in httpx's pool. The maintenance routine in
+``httpcore._async.connection_pool`` (around L303-309) runs
+"whenever a new request is added or removed from the pool" and is
+``O(queue_size × pool_size)`` per call —
+https://github.com/encode/httpcore/blob/master/httpcore/_async/connection_pool.py#L303-L309
+— so cost grows quadratically with backlog. aiohttp's connector
+queues natively in O(1), which is why our httpx backend needed a
+process-wide semaphore (``DYN_MM_HTTP_CONCURRENCY``) in front of
+the pool to keep ``PoolTimeout`` from leaking up the stack. That
+semaphore is redundant under aiohttp.
+
+Measured at 500 rps × 10k requests across server-processing-time
+buckets (lower is better, all latencies ms)::
+
+    [sweep] mean_ms=50  order=['aiohttp', 'httpx']
+    backend  wall(s)     avg     p50     p90     p99
+    httpx       20.1    75.7    51.0   158.7   241.1
+    aiohttp     20.1    50.7    50.6    50.8    51.1
+
+    [sweep] mean_ms=100  order=['httpx', 'aiohttp']
+    httpx       23.2  1550.4  1484.3  2430.2  3164.9
+    aiohttp     20.1   101.4   100.6   100.9   101.2
+
+    [sweep] mean_ms=200  order=['aiohttp', 'httpx']
+    httpx       43.2 11833.2 11762.6 21167.1 23025.2
+    aiohttp     20.8   320.5   231.2   733.3   830.3
+
+    [sweep] mean_ms=300  order=['httpx', 'aiohttp']
+    httpx       62.2 21229.8 21318.0 37834.0 41728.4
+    aiohttp     32.2  6355.0  6395.1 11119.6 12071.7
+
+Both backends are equivalent below saturation (mean_ms=50). Past
+saturation httpx degrades super-linearly while aiohttp stays close
+to the offered rate.
+
+Effective-defaults mapping (httpx → aiohttp)
+--------------------------------------------
+
+Operator-tunable knobs live in :mod:`.args`. The table below names
+every behaviorally-relevant knob: each row is either a *match*, a
+*semantic difference*, or an *intentional change*.
+
+================================  =========================================  =========================================  ====================================================================
+dimension                         httpx (old default)                        aiohttp (new default)                       parity
+================================  =========================================  =========================================  ====================================================================
+total pool size                   ``Limits(max_connections=100)``            ``TCPConnector(limit=100)``                 match
+per-host cap                      none                                       ``limit_per_host=0`` (unlimited)            match — load-bearing for single-origin fan-out, not env-tunable
+keepalive cap                     ``max_keepalive_connections=100`` (count)  ``keepalive_timeout=15s`` (time)            different (semantics) — aiohttp ages out idle conns by time, no count cap
+per-request timeout shape         ``Timeout(connect=5s, read=per-call,
+                                  write=None, pool=60s)``                    ``ClientTimeout(total=per-call)``           different (intentional) — one budget covering pool wait + connect + read + body, same shape as vLLM ``HTTPConnection``
+follow redirects                  ``follow_redirects=True`` (client)         ``allow_redirects=True`` (per call)         match
+concurrency cap                   process-wide ``Semaphore(50)``
+                                  (``DYN_MM_HTTP_CONCURRENCY``)              none — connector queues in O(1)            different (intentional) — semaphore was a workaround for httpx's O(queue × pool) cost; redundant under aiohttp
+proxy honored from env            ``trust_env=True`` (httpx default)         ``trust_env=True``                          match
+half-closed TLS cleanup           handled internally                         ``enable_cleanup_closed=True``              aiohttp-only knob
+================================  =========================================  =========================================  ====================================================================
 """
 
 from __future__ import annotations
@@ -61,7 +111,7 @@ class AiohttpClient(MmHttpClient):
             keepalive_timeout=self._args.keepalive_timeout,
             enable_cleanup_closed=True,
         )
-        return aiohttp.ClientSession(connector=connector, trust_env=False)
+        return aiohttp.ClientSession(connector=connector, trust_env=True)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         async with self._lock:
