@@ -118,11 +118,12 @@ class HttpxClient(MmHttpClient):
         client = await self._get_client()
         async with self._get_semaphore():
             try:
-                request = client.build_request("GET", url)
+                request = client.build_request(
+                    "GET", url, timeout=self._per_call_timeout(timeout)
+                )
                 response = await client.send(
                     request,
                     follow_redirects=False,
-                    timeout=self._per_call_timeout(timeout),
                 )
             except httpx.TimeoutException as e:
                 raise MmHttpTimeout(f"Timeout loading {url}") from e
