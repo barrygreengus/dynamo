@@ -73,9 +73,11 @@ class Base64LazyChatPayload(ChatPayload):
         repeat_count: int = 1,
         timeout: int = 60,
     ):
-        # Initialize the lazy state BEFORE super().__init__ — the parent
-        # dataclass __init__ assigns self.body = ..., which routes through
-        # our @body.setter and reads `_b64_storage`.
+        """Stash payload params for lazy body construction, then run parent init."""
+        # Initialize lazy state and the init flag BEFORE super().__init__ —
+        # the parent dataclass __init__ assigns self.body = ..., which routes
+        # through our @body.setter.
+        object.__setattr__(self, "_b64_initializing", True)
         object.__setattr__(self, "_b64_prompt", prompt)
         object.__setattr__(self, "_b64_max_tokens", max_tokens)
         object.__setattr__(self, "_b64_temperature", temperature)
@@ -88,8 +90,10 @@ class Base64LazyChatPayload(ChatPayload):
             repeat_count=repeat_count,
             timeout=timeout,
         )
+        object.__setattr__(self, "_b64_initializing", False)
 
     def _materialize_body(self) -> dict:
+        """Read the LFS image, base64-encode it, and build the chat body dict."""
         b64 = base64.b64encode(get_multimodal_test_image_bytes()).decode()
         ref = chat_payload(
             [
@@ -108,6 +112,7 @@ class Base64LazyChatPayload(ChatPayload):
 
     @property
     def body(self) -> dict:  # type: ignore[override]
+        """Return the chat body, materializing the base64 image on first access."""
         if not self._b64_materialized:
             object.__setattr__(self, "_b64_storage", self._materialize_body())
             object.__setattr__(self, "_b64_materialized", True)
@@ -115,13 +120,10 @@ class Base64LazyChatPayload(ChatPayload):
 
     @body.setter
     def body(self, value) -> None:
-        # External writes (e.g. with_model({**body, "model": ...})) overwrite
-        # storage. Do NOT flip _b64_materialized here — the parent dataclass
-        # __init__ writes a placeholder (None) before lazy reads happen, and
-        # we want the next .body read to still materialize when storage is
-        # the placeholder. with_model writes happen AFTER materialization, so
-        # _b64_materialized is already True and the new value is preserved.
+        """Store body; flip materialized so post-init writes survive next read."""
         object.__setattr__(self, "_b64_storage", value)
+        if not getattr(self, "_b64_initializing", True):
+            object.__setattr__(self, "_b64_materialized", True)
 
 
 def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
